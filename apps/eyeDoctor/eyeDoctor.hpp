@@ -1,0 +1,555 @@
+/** \file eyeDoctor.hpp
+  * \brief The MagAO-X Eye Doctor header file
+  *
+  * \ingroup eyeDoctor_files
+  */
+
+#ifndef eyeDoctor_hpp
+#define eyeDoctor_hpp
+
+#include <mx/improc/eigenImage.hpp>
+#include <mx/improc/milkImage.hpp>
+#include <mx/improc/eigenCube.hpp>
+using namespace mx::improc;
+
+#include "../../libMagAOX/libMagAOX.hpp" //Note this is included on command line to trigger pch
+#include "../../magaox_git_version.h"
+
+/** \defgroup eyeDoctor
+  * \brief The MagAO-X application to perform eye doctor measurements for DM optimization
+  *
+  * <a href="../handbook/operating/software/apps/eyeDoctor.html">Application Documentation</a>
+  *
+  * \ingroup apps
+  *
+  */
+
+/** \defgroup eyeDoctor_files
+  * \ingroup eyeDoctor
+  */
+
+namespace MagAOX
+{
+namespace app
+{
+
+/// The MagAO-X Eye Doctor Application
+/**
+ * \ingroup eyeDoctor
+ */
+class eyeDoctor : public MagAOXApp<true>,
+                 public dev::dmPokeWFS<eyeDoctor>,
+                 public dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::wfsShmimT>,
+                 public dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::darkShmimT>,
+                 public dev::telemeter<eyeDoctor>
+{
+    // Give the test harness access.
+    friend class eyeDoctor_test;
+
+    friend class dev::dmPokeWFS<eyeDoctor>;
+    
+    typedef dev::dmPokeWFS<eyeDoctor> dmPokeWFST;
+
+    friend class dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::wfsShmimT>;
+    typedef dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::wfsShmimT> shmimMonitorT;
+
+    friend class dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::darkShmimT>;
+    typedef dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::darkShmimT> darkShmimMonitorT;
+
+    friend class dev::telemeter<eyeDoctor>;
+    typedef dev::telemeter<eyeDoctor> telemeterT;
+
+protected:
+    /** \name Configurable Parameters
+      *@{
+      */
+   
+    std::string m_dmModes; ///< DM modes to use for optimization
+    std::string m_shmim; ///< Camera shmim to target
+    double m_psfCoreRadiusPixels; ///< PSF core radius in pixels
+    std::string m_modesToOptimize; ///< Modes to optimize
+    double m_searchRange; ///< Search range for optimization
+    std::vector<std::string> m_availableCameras; ///< List of available cameras
+    std::string m_selectedCamera; ///< Currently selected camera
+    double m_dmPokeDelay; ///< Delay between DM commands in microseconds (CACAO mlat parameter)
+    
+    ///@}
+
+    // Eye doctor specific members
+    mx::improc::eigenImage<float> m_psfImage;
+    mx::improc::eigenImage<float> m_optimizedImage;
+    std::vector<float> m_modeCoefficients;
+    std::vector<float> m_optimizationResults;
+    
+    // State management
+    bool m_optimizationInProgress;
+    bool m_measurementComplete;
+    int m_currentModeIndex;
+    int m_totalModes;
+
+public:
+    /// Default c'tor.
+    eyeDoctor();
+
+    /// D'tor, declared and defined for noexcept.
+    ~eyeDoctor() noexcept
+    {}
+
+    virtual void setupConfig();
+
+    /// Implementation of loadConfig logic, separated for testing.
+    /** This is called by loadConfig().
+      */
+    int loadConfigImpl( mx::app::appConfigurator & _config /**< [in] an application configuration from which to load values*/);
+
+    virtual void loadConfig();
+
+    /// Startup function
+    /**
+      *
+      */
+    virtual int appStartup();
+
+    /// Implementation of the FSM for eyeDoctor.
+    /** 
+      * \returns 0 on no critical error
+      * \returns -1 on an error requiring shutdown
+      */
+    virtual int appLogic();
+
+    /// Shutdown the app.
+    /** 
+      *
+      */
+    virtual int appShutdown();
+
+    // Required interface functions for dmPokeWFS
+    int runSensor(bool firstRun);
+    int analyzeSensor();
+
+    // Eye doctor specific functions
+    int startOptimization();
+    int stopOptimization();
+    int measurePSF();
+    int optimizeMode(int modeIndex);
+    int calculateOptimizationResult();
+
+protected:
+    /** \name INDI Interface
+      * @{
+      */
+
+    pcf::IndiProperty m_indiP_dmModes;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmModes);
+
+    pcf::IndiProperty m_indiP_shmim;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_shmim);
+
+    pcf::IndiProperty m_indiP_psfCoreRadiusPixels;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadiusPixels);
+
+    pcf::IndiProperty m_indiP_modesToOptimize;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_modesToOptimize);
+
+    pcf::IndiProperty m_indiP_searchRange;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_searchRange);
+
+    pcf::IndiProperty m_indiP_availableCameras;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_availableCameras);
+
+    pcf::IndiProperty m_indiP_dmPokeDelay;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
+
+    pcf::IndiProperty m_indiP_startOptimization;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startOptimization);
+
+    pcf::IndiProperty m_indiP_stopOptimization;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_stopOptimization);
+
+    pcf::IndiProperty m_indiP_optimizationStatus;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_optimizationStatus);
+
+    pcf::IndiProperty m_indiP_results;
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_results);
+
+    ///@}
+
+    /** \name Telemeter Interface
+      * @{
+      */
+
+    int recordTelem(const telem_pokeloop *);
+
+    int recordEyeDoctor(bool force = false);
+
+    ///@}
+
+private:
+    int updateOptimizationStatus();
+    int updateResults();
+
+    // Required interface methods for dmPokeWFS
+    dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::wfsShmimT> & shmimMonitor()
+    {
+        return static_cast<dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::wfsShmimT>&>(*this);
+    }
+
+    dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::darkShmimT> & darkShmimMonitor()
+    {
+        return static_cast<dev::shmimMonitor<eyeDoctor, dev::dmPokeWFS<eyeDoctor>::darkShmimT>&>(*this);
+    }
+};
+
+eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
+{
+    m_optimizationInProgress = false;
+    m_measurementComplete = false;
+    m_currentModeIndex = 0;
+    m_totalModes = 0;
+    m_dmPokeDelay = 10000; // Default 10ms delay
+    return;
+}
+
+void eyeDoctor::setupConfig()
+{
+    DMPOKEWFS_SETUP_CONFIG(config);
+
+    config.add("eyedoctor.dmModes", "", "eyedoctor.dmModes", argType::Required, "eyedoctor", "dmModes", false, "string", "DM modes to use for optimization");
+    config.add("eyedoctor.shmim", "", "eyedoctor.shmim", argType::Required, "eyedoctor", "shmim", false, "string", "Camera shmim to target");
+    config.add("eyedoctor.psfCoreRadiusPixels", "", "eyedoctor.psfCoreRadiusPixels", argType::Required, "eyedoctor", "psfCoreRadiusPixels", false, "float", "PSF core radius in pixels");
+    config.add("eyedoctor.modesToOptimize", "", "eyedoctor.modesToOptimize", argType::Required, "eyedoctor", "modesToOptimize", false, "string", "Modes to optimize");
+    config.add("eyedoctor.searchRange", "", "eyedoctor.searchRange", argType::Required, "eyedoctor", "searchRange", false, "float", "Search range for optimization");
+    config.add("eyedoctor.availableCameras", "", "eyedoctor.availableCameras", argType::Required, "eyedoctor", "availableCameras", false, "vector<string>", "List of available cameras");
+    config.add("eyedoctor.dmPokeDelay", "", "eyedoctor.dmPokeDelay", argType::Required, "eyedoctor", "dmPokeDelay", false, "float", "Delay between DM commands in microseconds");
+}
+
+int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
+{
+    DMPOKEWFS_LOAD_CONFIG(_config);
+
+    _config(m_dmModes, "eyedoctor.dmModes");
+    _config(m_shmim, "eyedoctor.shmim");
+    _config(m_psfCoreRadiusPixels, "eyedoctor.psfCoreRadiusPixels");
+    _config(m_modesToOptimize, "eyedoctor.modesToOptimize");
+    _config(m_searchRange, "eyedoctor.searchRange");
+    _config(m_availableCameras, "eyedoctor.availableCameras");
+    _config(m_dmPokeDelay, "eyedoctor.dmPokeDelay");
+
+    // Set default selected camera to first available
+    if(m_availableCameras.size() > 0)
+    {
+        m_selectedCamera = m_availableCameras[0];
+    }
+
+    return 0;
+}
+
+void eyeDoctor::loadConfig()
+{
+    loadConfigImpl(config);
+}
+
+int eyeDoctor::appStartup()
+{
+    DMPOKEWFS_APP_STARTUP;
+
+    // Setup INDI properties
+    CREATE_REG_INDI_NEW_TEXT(m_indiP_dmModes, "dmModes", "", "");
+    m_indiP_dmModes["current"].setValue(m_dmModes);
+
+    CREATE_REG_INDI_NEW_TEXT(m_indiP_shmim, "shmim", "", "");
+    m_indiP_shmim["current"].setValue(m_shmim);
+
+    CREATE_REG_INDI_NEW_NUMBERF(m_indiP_psfCoreRadiusPixels, "psfCoreRadiusPixels", 0.1, 100.0, 0.1, "%0.1f", "", "");
+    m_indiP_psfCoreRadiusPixels["current"].setValue(m_psfCoreRadiusPixels);
+
+    CREATE_REG_INDI_NEW_TEXT(m_indiP_modesToOptimize, "modesToOptimize", "", "");
+    m_indiP_modesToOptimize["current"].setValue(m_modesToOptimize);
+
+    CREATE_REG_INDI_NEW_NUMBERF(m_indiP_searchRange, "searchRange", 0.01, 10.0, 0.01, "%0.2f", "", "");
+    m_indiP_searchRange["current"].setValue(m_searchRange);
+
+    CREATE_REG_INDI_NEW_TEXT(m_indiP_availableCameras, "availableCameras", "", "");
+    m_indiP_availableCameras["current"].setValue(m_selectedCamera);
+
+    CREATE_REG_INDI_NEW_NUMBERF(m_indiP_dmPokeDelay, "dmPokeDelay", 1000, 100000, 1000, "%0.0f", "", "");
+    m_indiP_dmPokeDelay["current"].setValue(m_dmPokeDelay);
+
+    CREATE_REG_INDI_NEW_TOGGLESWITCH(m_indiP_startOptimization, "startOptimization");
+    CREATE_REG_INDI_NEW_TOGGLESWITCH(m_indiP_stopOptimization, "stopOptimization");
+
+    registerIndiPropertyReadOnly(m_indiP_optimizationStatus, "optimizationStatus", pcf::IndiProperty::Text, pcf::IndiProperty::ReadOnly, pcf::IndiProperty::Idle);
+    m_indiP_optimizationStatus.add({"status", "Idle"});
+
+    registerIndiPropertyReadOnly(m_indiP_results, "results", pcf::IndiProperty::Number, pcf::IndiProperty::ReadOnly, pcf::IndiProperty::Idle);
+    m_indiP_results.add({"progress", 0.0});
+    m_indiP_results.add({"currentMode", 0});
+
+    return 0;
+}
+
+int eyeDoctor::appLogic()
+{
+    DMPOKEWFS_APP_LOGIC;
+
+    // Update INDI properties
+    updateIfChanged(m_indiP_dmModes, "current", m_dmModes);
+    updateIfChanged(m_indiP_shmim, "current", m_shmim);
+    updateIfChanged(m_indiP_psfCoreRadiusPixels, "current", m_psfCoreRadiusPixels);
+    updateIfChanged(m_indiP_modesToOptimize, "current", m_modesToOptimize);
+    updateIfChanged(m_indiP_searchRange, "current", m_searchRange);
+    updateIfChanged(m_indiP_availableCameras, "current", m_selectedCamera);
+    updateIfChanged(m_indiP_dmPokeDelay, "current", m_dmPokeDelay);
+
+    return 0;
+}
+
+int eyeDoctor::appShutdown()
+{
+    DMPOKEWFS_APP_SHUTDOWN;
+    return 0;
+}
+
+// Required interface functions for dmPokeWFS
+int eyeDoctor::runSensor(bool firstRun)
+{
+    if(firstRun)
+    {
+        // Take dark frame if needed
+        m_measurementComplete = false;
+    }
+
+    // Run the basic sensor measurement
+    return dmPokeWFST::basicRunSensor();
+}
+
+int eyeDoctor::analyzeSensor()
+{
+    // Analyze the poke image and calculate PSF metrics
+    if(measurePSF() < 0)
+    {
+        return -1;
+    }
+
+    // Update measurement results
+    updateMeasurement(0.0, 0.0); // Placeholder - actual calculation needed
+
+    m_measurementComplete = true;
+    return 0;
+}
+
+// Eye doctor specific functions
+int eyeDoctor::startOptimization()
+{
+    if(m_optimizationInProgress)
+    {
+        return 0; // Already running
+    }
+
+    m_optimizationInProgress = true;
+    m_currentModeIndex = 0;
+    m_totalModes = 1; // Placeholder - parse from m_modesToOptimize
+
+    updateOptimizationStatus();
+    return 0;
+}
+
+int eyeDoctor::stopOptimization()
+{
+    m_optimizationInProgress = false;
+    updateOptimizationStatus();
+    return 0;
+}
+
+int eyeDoctor::measurePSF()
+{
+    // Placeholder for PSF measurement logic
+    // This would analyze the current image and extract PSF metrics
+    return 0;
+}
+
+int eyeDoctor::optimizeMode(int modeIndex)
+{
+    // Placeholder for mode optimization logic
+    // This would apply the mode, measure PSF, and optimize coefficients
+    (void)modeIndex; // Suppress unused parameter warning
+    return 0;
+}
+
+int eyeDoctor::calculateOptimizationResult()
+{
+    // Placeholder for result calculation
+    return 0;
+}
+
+int eyeDoctor::updateOptimizationStatus()
+{
+    std::string status = m_optimizationInProgress ? "Running" : "Idle";
+    m_indiP_optimizationStatus["status"] = status;
+    updateIfChanged(m_indiP_optimizationStatus, "status", status);
+    return 0;
+}
+
+int eyeDoctor::updateResults()
+{
+    updateIfChanged(m_indiP_results, "progress", (double)m_currentModeIndex / m_totalModes);
+    updateIfChanged(m_indiP_results, "currentMode", m_currentModeIndex);
+    return 0;
+}
+
+// INDI Callbacks
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmModes)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmModes, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_dmModes, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_dmModes = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_shmim)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_shmim, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_shmim, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_shmim = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_psfCoreRadiusPixels)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_psfCoreRadiusPixels, ipRecv)
+   
+    float target;
+    if(indiTargetUpdate(m_indiP_psfCoreRadiusPixels, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_psfCoreRadiusPixels = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_modesToOptimize)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_modesToOptimize, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_modesToOptimize, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_modesToOptimize = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_searchRange)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_searchRange, ipRecv)
+   
+    float target;
+    if(indiTargetUpdate(m_indiP_searchRange, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_searchRange = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_availableCameras)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_availableCameras, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_availableCameras, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_selectedCamera = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmPokeDelay)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmPokeDelay, ipRecv)
+   
+    float target;
+    if(indiTargetUpdate(m_indiP_dmPokeDelay, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_dmPokeDelay = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_startOptimization)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_startOptimization, ipRecv)
+   
+    if(ipRecv.find("toggle") != true)
+    {
+        return -1;
+    }
+
+    if(ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On)
+    {
+        if(startOptimization() < 0)
+        {
+            return log<software_error,-1>({__FILE__, __LINE__});
+        }
+    }
+
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_stopOptimization)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_stopOptimization, ipRecv)
+   
+    if(ipRecv.find("toggle") != true)
+    {
+        return -1;
+    }
+
+    if(ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On)
+    {
+        if(stopOptimization() < 0)
+        {
+            return log<software_error,-1>({__FILE__, __LINE__});
+        }
+    }
+
+    return 0;
+}
+
+// Telemeter interface
+int eyeDoctor::recordTelem(const telem_pokeloop *)
+{
+    return recordEyeDoctor(true);
+}
+
+int eyeDoctor::recordEyeDoctor(bool force)
+{
+    // Placeholder for telemetry recording
+    (void)force; // Suppress unused parameter warning
+    return 0;
+}
+
+} //namespace app
+} //namespace MagAOX
+
+#endif //eyeDoctor_hpp
