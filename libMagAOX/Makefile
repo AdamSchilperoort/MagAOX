@@ -25,6 +25,7 @@ INCLUDEDEPS= app/MagAOXApp.hpp \
              app/dev/dm.hpp \
              app/dev/telemeter.hpp \
 			 app/dev/dmPokeWFS.hpp \
+             app/dev/dmWavefrontControl.hpp \
              common/config.hpp \
              common/defaults.hpp \
              common/environment.hpp \
@@ -126,6 +127,7 @@ all: libMagAOX.hpp.gch libMagAOX.a
 
 app/MagAOXApp.o: app/MagAOXApp.hpp app/indiDriver.hpp app/indiMacros.hpp app/indiUtils.hpp app/stateCodes.o 
 app/stateCodes.o: app/stateCodes.hpp
+
 
 libMagAOX.hpp.gch: libMagAOX.hpp $(INCLUDEDEPS) logger/generated/logTypes.hpp $(OBJS)
 
