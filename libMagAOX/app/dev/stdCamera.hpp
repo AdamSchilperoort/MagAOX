@@ -413,24 +413,15 @@ class stdCamera
     
     // Camera clock information
     double m_cameraClock{ 0 };         ///< Camera internal clock timestamp (nanoseconds)
-    double m_systemClock{ 0 };         ///< System clock when frame received (nanoseconds)
-    
-    // CACAO-style mlat parameter
-    double m_mlat{ 0 };                ///< Measured latency between DM and camera (microseconds)
-    double m_mlatAvg{ 0 };             ///< Average mlat over recent measurements
-    double m_mlatStd{ 0 };             ///< Standard deviation of mlat
     
     // Timing statistics
     static constexpr size_t m_timingBufferSize{ 100 }; ///< Size of circular buffer for timing statistics
     std::vector<double> m_latencyBuffer;               ///< Circular buffer for latency measurements
-    std::vector<double> m_mlatBuffer;                  ///< Circular buffer for mlat measurements
     size_t m_timingBufferIndex{ 0 };                   ///< Current index in circular buffers
     
     // INDI properties for timing information
     pcf::IndiProperty m_indiP_frameLatency;
     pcf::IndiProperty m_indiP_cameraClock;
-    pcf::IndiProperty m_indiP_systemClock;
-    pcf::IndiProperty m_indiP_mlat;
     
     ///@}
 
@@ -892,31 +883,21 @@ class stdCamera
      * after each frame acquisition. It updates the circular buffers and calculates
      * running statistics.
      *
-     * \param frameLatency [in] The latency from DM command to frame reception (microseconds)
+     * \param frameLatency [in] The latency from exposure start to frame memory access (microseconds)
      * \param cameraClock [in] The camera's internal clock timestamp (nanoseconds)
-     * \param systemClock [in] The system clock when frame was received (nanoseconds)
-     * \param mlat [in] The measured latency between DM and camera (microseconds)
      *
      * \returns 0 on success
      * \returns -1 on error
      */
-    int updateFrameTiming(double frameLatency, double cameraClock, double systemClock, double mlat = 0);
+    int updateFrameTiming(double frameLatency, double cameraClock);
 
     /// Get current frame latency
     /** \returns the current frame latency in microseconds */
     double getFrameLatency() const { return m_frameLatency; }
 
-    /// Get current mlat value
-    /** \returns the current mlat value in microseconds */
-    double getMlat() const { return m_mlat; }
-
     /// Get average frame latency
     /** \returns the average frame latency over recent frames in microseconds */
     double getFrameLatencyAvg() const { return m_frameLatencyAvg; }
-
-    /// Get average mlat value
-    /** \returns the average mlat value over recent measurements in microseconds */
-    double getMlatAvg() const { return m_mlatAvg; }
 
     ///@}
     int newCallBack_cropMode(
@@ -1751,31 +1732,7 @@ int stdCamera<derivedT>::appStartup()
         return -1;
     }
 
-    derived().createROIndiNumber( m_indiP_systemClock, "system_clock", "System Clock", "System Clock (ns)" );
-    m_indiP_systemClock.add( pcf::IndiElement( "current" ) );
-    m_indiP_systemClock["current"].set( m_systemClock );
-    if( derived().registerIndiPropertyReadOnly( m_indiP_systemClock ) < 0 )
-    {
-#ifndef STDCAMERA_TEST_NOLOG
-        derivedT::template log<software_error>( { __FILE__, __LINE__ } );
-#endif
-        return -1;
-    }
 
-    derived().createROIndiNumber( m_indiP_mlat, "mlat", "MLAT", "Measured Latency (μs)" );
-    m_indiP_mlat.add( pcf::IndiElement( "current" ) );
-    m_indiP_mlat.add( pcf::IndiElement( "average" ) );
-    m_indiP_mlat.add( pcf::IndiElement( "stddev" ) );
-    m_indiP_mlat["current"].set( m_mlat );
-    m_indiP_mlat["average"].set( m_mlatAvg );
-    m_indiP_mlat["stddev"].set( m_mlatStd );
-    if( derived().registerIndiPropertyReadOnly( m_indiP_mlat ) < 0 )
-    {
-#ifndef STDCAMERA_TEST_NOLOG
-        derivedT::template log<software_error>( { __FILE__, __LINE__ } );
-#endif
-        return -1;
-    }
 
     return 0;
 } // int stdCamera<derivedT>::appStartup()
@@ -3329,24 +3286,20 @@ int stdCamera<derivedT>::recordCamera( bool force )
 }
 
 template <class derivedT>
-int stdCamera<derivedT>::updateFrameTiming(double frameLatency, double cameraClock, double systemClock, double mlat)
+int stdCamera<derivedT>::updateFrameTiming(double frameLatency, double cameraClock)
 {
     // Update current values
     m_frameLatency = frameLatency;
     m_cameraClock = cameraClock;
-    m_systemClock = systemClock;
-    m_mlat = mlat;
 
     // Update circular buffers
     if (m_latencyBuffer.size() < m_timingBufferSize)
     {
         m_latencyBuffer.push_back(frameLatency);
-        m_mlatBuffer.push_back(mlat);
     }
     else
     {
         m_latencyBuffer[m_timingBufferIndex] = frameLatency;
-        m_mlatBuffer[m_timingBufferIndex] = mlat;
     }
 
     // Update buffer index
@@ -3365,29 +3318,11 @@ int stdCamera<derivedT>::updateFrameTiming(double frameLatency, double cameraClo
         m_frameLatencyStd = sqrt((sumSq / m_latencyBuffer.size()) - (m_frameLatencyAvg * m_frameLatencyAvg));
     }
 
-    if (!m_mlatBuffer.empty())
-    {
-        double sum = 0.0, sumSq = 0.0;
-        for (double val : m_mlatBuffer)
-        {
-            sum += val;
-            sumSq += val * val;
-        }
-        m_mlatAvg = sum / m_mlatBuffer.size();
-        m_mlatStd = sqrt((sumSq / m_mlatBuffer.size()) - (m_mlatAvg * m_mlatAvg));
-    }
-
     // Update INDI properties
     derived().updateIfChanged(m_indiP_frameLatency, "current", m_frameLatency, INDI_IDLE);
     derived().updateIfChanged(m_indiP_frameLatency, "average", m_frameLatencyAvg, INDI_IDLE);
     derived().updateIfChanged(m_indiP_frameLatency, "stddev", m_frameLatencyStd, INDI_IDLE);
-
     derived().updateIfChanged(m_indiP_cameraClock, "current", m_cameraClock, INDI_IDLE);
-    derived().updateIfChanged(m_indiP_systemClock, "current", m_systemClock, INDI_IDLE);
-
-    derived().updateIfChanged(m_indiP_mlat, "current", m_mlat, INDI_IDLE);
-    derived().updateIfChanged(m_indiP_mlat, "average", m_mlatAvg, INDI_IDLE);
-    derived().updateIfChanged(m_indiP_mlat, "stddev", m_mlatStd, INDI_IDLE);
 
     return 0;
 }

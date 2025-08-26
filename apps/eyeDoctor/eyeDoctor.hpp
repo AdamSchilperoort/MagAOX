@@ -135,8 +135,24 @@ protected:
     pcf::IndiProperty m_indiP_optimizationStatus;
     pcf::IndiProperty m_indiP_results;
 
+    // Algorithm-specific INDI properties
+    pcf::IndiProperty m_indiP_targetLatency;
+    pcf::IndiProperty m_indiP_autoOptimizeLatency;
+    pcf::IndiProperty m_indiP_startOptimization;
+    pcf::IndiProperty m_indiP_stopOptimization;
+
+    // Algorithm-specific parameters
+    double m_targetLatency;               ///< Target latency between DM and camera (microseconds)
+    double m_latencyTolerance;            ///< Tolerance around target latency (microseconds)
+    bool m_autoOptimizeLatency;           ///< Whether to automatically optimize latency
+    
+    // Optimization parameters
+    int m_maxIterations;                  ///< Maximum number of optimization iterations
+    double m_convergenceThreshold;        ///< Convergence threshold for optimization
+    bool m_adaptiveStepSize;              ///< Whether to use adaptive step sizes
+
     // Callback declarations for dmWavefrontControl properties
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmModes);
+
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeAmplitude);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_wfsCamera);
@@ -176,6 +192,17 @@ eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
     m_measurementComplete = false;
     m_currentModeIndex = 0;
     m_totalModes = 0;
+    
+    // Initialize algorithm-specific parameters
+    m_targetLatency = 1000; // 1ms default
+    m_latencyTolerance = 100; // 100 microseconds tolerance
+    m_autoOptimizeLatency = false;
+    
+    // Initialize optimization parameters
+    m_maxIterations = 100;
+    m_convergenceThreshold = 1e-6;
+    m_adaptiveStepSize = true;
+    
     return;
 }
 
@@ -185,6 +212,15 @@ void eyeDoctor::setupConfig()
 
     config.add("eyedoctor.modesToOptimize", "", "eyedoctor.modesToOptimize", argType::Required, "eyedoctor", "modesToOptimize", false, "string", "Modes to optimize");
     config.add("eyedoctor.availableCameras", "", "eyedoctor.availableCameras", argType::Required, "eyedoctor", "availableCameras", false, "vector<string>", "List of available cameras");
+    
+    // Algorithm-specific configuration
+    config.add("eyedoctor.targetLatency", "", "eyedoctor.targetLatency", argType::Required, "eyedoctor", "targetLatency", false, "float", "Target latency between DM and camera (microseconds)");
+    config.add("eyedoctor.latencyTolerance", "", "eyedoctor.latencyTolerance", argType::Required, "eyedoctor", "latencyTolerance", false, "float", "Tolerance around target latency (microseconds)");
+    config.add("eyedoctor.autoOptimizeLatency", "", "eyedoctor.autoOptimizeLatency", argType::Required, "eyedoctor", "autoOptimizeLatency", false, "bool", "Whether to automatically optimize latency");
+    
+    config.add("eyedoctor.maxIterations", "", "eyedoctor.maxIterations", argType::Required, "eyedoctor", "maxIterations", false, "int", "Maximum number of optimization iterations");
+    config.add("eyedoctor.convergenceThreshold", "", "eyedoctor.convergenceThreshold", argType::Required, "eyedoctor", "convergenceThreshold", false, "float", "Convergence threshold for optimization");
+    config.add("eyedoctor.adaptiveStepSize", "", "eyedoctor.adaptiveStepSize", argType::Required, "eyedoctor", "adaptiveStepSize", false, "bool", "Whether to use adaptive step sizes");
 }
 
 int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
@@ -193,6 +229,14 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
 
     _config(m_modesToOptimize, "eyedoctor.modesToOptimize");
     _config(m_availableCameras, "eyedoctor.availableCameras");
+
+    // Load algorithm-specific configuration
+    _config(m_targetLatency, "eyedoctor.targetLatency");
+    _config(m_latencyTolerance, "eyedoctor.latencyTolerance");
+    _config(m_autoOptimizeLatency, "eyedoctor.autoOptimizeLatency");
+    _config(m_maxIterations, "eyedoctor.maxIterations");
+    _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
+    _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
 
     // Set default selected camera to first available
     if(m_availableCameras.size() > 0)
@@ -237,6 +281,18 @@ int eyeDoctor::appStartup()
     registerIndiPropertyReadOnly(m_indiP_results, "results", pcf::IndiProperty::Number, pcf::IndiProperty::ReadOnly, pcf::IndiProperty::Idle);
     m_indiP_results.add({"progress", 0.0});
     m_indiP_results.add({"currentMode", 0});
+
+    // Create algorithm-specific INDI properties
+    this->createStandardIndiNumber(m_indiP_targetLatency, "targetLatency", 100, 10000, 100, "%0.0f");
+    this->createStandardIndiToggleSw(m_indiP_autoOptimizeLatency, "autoOptimizeLatency", "Auto Optimize Latency");
+    this->createStandardIndiRequestSw(m_indiP_startOptimization, "startOptimization");
+    this->createStandardIndiRequestSw(m_indiP_stopOptimization, "stopOptimization");
+
+    // Register algorithm-specific INDI properties
+    if(this->registerIndiPropertyNew(m_indiP_targetLatency, &eyeDoctor::st_newCallBack_m_indiP_targetLatency) < 0) return -1;
+    if(this->registerIndiPropertyNew(m_indiP_autoOptimizeLatency, &eyeDoctor::st_newCallBack_m_indiP_autoOptimizeLatency) < 0) return -1;
+    if(this->registerIndiPropertyNew(m_indiP_startOptimization, &eyeDoctor::st_newCallBack_m_indiP_startOptimization) < 0) return -1;
+    if(this->registerIndiPropertyNew(m_indiP_stopOptimization, &eyeDoctor::st_newCallBack_m_indiP_stopOptimization) < 0) return -1;
 
     return 0;
 }
@@ -369,19 +425,6 @@ int eyeDoctor::recordEyeDoctor(bool force)
 }
 
 // Callback definitions for dmWavefrontControl properties
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmModes)(const pcf::IndiProperty &ipRecv)
-{
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmModes, ipRecv)
-   
-    std::string target;
-    if(indiTargetUpdate(m_indiP_dmModes, target, ipRecv, false) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__});
-    }
-
-    // Update the dmWavefrontControl property
-    return 0;
-}
 
 INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmPokeAmplitude)(const pcf::IndiProperty &ipRecv)
 {

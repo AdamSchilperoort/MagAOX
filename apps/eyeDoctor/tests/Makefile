@@ -1,21 +1,46 @@
 # Makefile for eyeDoctor tests
 
-include ../../../Make/common.mk
+# Compiler and flags
+CXX = g++
+CXXFLAGS = -std=c++17 -Wall -Wextra -O3 -fopenmp
+INCLUDES = -I/usr/local/include/eigen3 -I/usr/local/include
 
-TARGET = eyeDoctor_test
-SOURCES = eyeDoctor_test.cpp
-OBJECTS = $(SOURCES:.cpp=.o)
+# Source files
+TEST_SOURCES = testEyeDoctor.cpp testEyeDoctorIntegration.cpp
+TEST_OBJECTS = $(TEST_SOURCES:.cpp=.o)
 
-$(TARGET): $(OBJECTS)
-	$(CXX) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
+# Test executables
+TEST_EXEC = testEyeDoctor
+INTEGRATION_EXEC = testEyeDoctorIntegration
 
+# Default target
+all: $(TEST_EXEC) $(INTEGRATION_EXEC)
+
+# Build test executable
+$(TEST_EXEC): testEyeDoctor.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(INCLUDES)
+
+# Build integration test executable
+$(INTEGRATION_EXEC): testEyeDoctorIntegration.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(INCLUDES)
+
+# Compile test objects
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
-test: $(TARGET)
-	./$(TARGET)
-
+# Clean
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f $(TEST_OBJECTS) $(TEST_EXEC) $(INTEGRATION_EXEC)
 
-.PHONY: clean test
+# Run basic tests
+test: $(TEST_EXEC)
+	./$(TEST_EXEC)
+
+# Run integration tests
+test-integration: $(INTEGRATION_EXEC)
+	./$(INTEGRATION_EXEC)
+
+# Run all tests
+test-all: test test-integration
+
+.PHONY: all clean test test-integration test-all
