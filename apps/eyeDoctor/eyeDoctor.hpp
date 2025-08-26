@@ -55,8 +55,8 @@ class eyeDoctor : public MagAOXApp<true>,
 protected:
     /** \name Configurable Parameters
       *@{
-      */
-   
+     */
+    
     std::string m_modesToOptimize; ///< Modes to optimize
     std::vector<std::string> m_availableCameras; ///< List of available cameras
     std::string m_selectedCamera; ///< Currently selected camera
@@ -127,9 +127,6 @@ protected:
       * @{
       */
 
-
-
-    pcf::IndiProperty m_indiP_modesToOptimize;
     pcf::IndiProperty m_indiP_availableCameras;
 
     pcf::IndiProperty m_indiP_optimizationStatus;
@@ -157,7 +154,6 @@ protected:
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_wfsCamera);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadius);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_modesToOptimize);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_searchRange);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_targetLatency);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_autoOptimizeLatency);
@@ -257,15 +253,6 @@ int eyeDoctor::appStartup()
     DMWAVEFRONTCONTROL_APP_STARTUP;
 
     // Setup eyeDoctor-specific INDI properties
-    m_indiP_modesToOptimize = pcf::IndiProperty(pcf::IndiProperty::Text);
-    m_indiP_modesToOptimize.setDevice(this->configName());
-    m_indiP_modesToOptimize.setName("modesToOptimize");
-    m_indiP_modesToOptimize.setGroup("main");
-    m_indiP_modesToOptimize.setLabel("Modes to Optimize");
-    m_indiP_modesToOptimize.add(pcf::IndiElement("current"));
-    m_indiP_modesToOptimize["current"].setValue(m_modesToOptimize);
-    if(registerIndiPropertyReadOnly(m_indiP_modesToOptimize) < 0) return -1;
-
     m_indiP_availableCameras = pcf::IndiProperty(pcf::IndiProperty::Text);
     m_indiP_availableCameras.setDevice(this->configName());
     m_indiP_availableCameras.setName("availableCameras");
@@ -302,7 +289,6 @@ int eyeDoctor::appLogic()
     DMWAVEFRONTCONTROL_APP_LOGIC;
 
     // Update eyeDoctor-specific INDI properties
-    updateIfChanged(m_indiP_modesToOptimize, "current", m_modesToOptimize);
     updateIfChanged(m_indiP_availableCameras, "current", m_selectedCamera);
 
     return 0;
@@ -474,20 +460,6 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_psfCoreRadius)(const pcf::IndiProperty 
    
     float target;
     if(indiTargetUpdate(m_indiP_psfCoreRadius, target, ipRecv, false) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__});
-    }
-
-    // Update the dmWavefrontControl property
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_modesToOptimize)(const pcf::IndiProperty &ipRecv)
-{
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_modesToOptimize, ipRecv)
-   
-    std::string target;
-    if(indiTargetUpdate(m_indiP_modesToOptimize, target, ipRecv, false) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
