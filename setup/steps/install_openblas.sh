@@ -16,7 +16,6 @@ detect_cpu_target() {
     if [[ "$arch" == "aarch64" ]] || [[ "$arch" == "arm64" ]]; then
         # ARM64 architectures
         local cpu_part=$(grep "^CPU part" /proc/cpuinfo | head -1 | awk -F': ' '{print $2}' 2>/dev/null || echo "0")
-        local cpu_revision=$(grep "^CPU revision" /proc/cpuinfo | head -1 | awk -F': ' '{print $2}' 2>/dev/null || echo "0")
         
         # ARM Cortex-A series detection
         case "$cpu_part" in
@@ -256,7 +255,7 @@ for target in "${TARGETS[@]}"; do
     make clean 2>/dev/null || true
     
     log_info "Running: make TARGET=$target USE_OPENMP=1 USE_CBLAS=1 -j$(nproc)"
-    if make TARGET=$target USE_OPENMP=1 USE_CBLAS=1 -j$(nproc) 2>&1 | tee /tmp/openblas_build_${target}.log; then
+    if make TARGET="$target" USE_OPENMP=1 USE_CBLAS=1 -j"$(nproc)" 2>&1 | tee /tmp/openblas_build_${target}.log; then
         log_info "OpenBLAS build successful with TARGET=$target"
         BUILD_SUCCESS=true
         BUILT_TARGET=$target
@@ -265,7 +264,7 @@ for target in "${TARGETS[@]}"; do
         log_warn "OpenBLAS build failed with TARGET=$target"
         log_warn "Build log saved to /tmp/openblas_build_${target}.log"
         log_warn "Last 20 lines of build output:"
-        tail -20 /tmp/openblas_build_${target}.log
+        tail -20 /tmp/openblas_build_"${target}".log
         log_warn "Trying next target..."
     fi
 done
@@ -279,7 +278,7 @@ if [[ "$BUILD_SUCCESS" == "false" ]]; then
         
         make clean 2>/dev/null || true
         
-        if make TARGET=$target USE_THREAD=0 USE_CBLAS=1 -j$(nproc); then
+        if make TARGET="$target" USE_THREAD=0 USE_CBLAS=1 -j"$(nproc)"; then
             log_info "OpenBLAS build successful with TARGET=$target USE_THREAD=0"
             BUILD_SUCCESS=true
             BUILT_TARGET=$target
@@ -327,7 +326,7 @@ cd /opt/MagAOX/vendor/OpenBLAS-0.3.24
 sudo cp -r include/* /opt/MagAOX/vendor/include/ 2>/dev/null || true
 
 # Copy other header files that are in root
-sudo cp *.h /opt/MagAOX/vendor/include/ 2>/dev/null || true
+sudo cp ./*.h /opt/MagAOX/vendor/include/ 2>/dev/null || true
 
 # Copy CBLAS headers as well
 log_info "Installing CBLAS headers"
