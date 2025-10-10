@@ -57,9 +57,41 @@ protected:
       *@{
      */
     
-    std::string m_modesToOptimize; ///< Modes to optimize
-    std::vector<std::string> m_availableCameras; ///< List of available cameras
-    std::string m_selectedCamera; ///< Currently selected camera
+    // DM Device Selection
+    std::vector<std::string> m_availableDMs;      ///< List of available DM devices
+    std::string m_selectedDM;                     ///< Currently selected DM device
+    std::string m_dmDeviceName;                   ///< Actual DM device name (dmwoofer, dmncpc, dmtweeter, dmkilo)
+    std::string m_dmShmimName;                    ///< DM shared memory name (dm00disp, dm01disp, dm02disp)
+    
+    // Camera Selection
+    std::vector<std::string> m_availableCameras;  ///< List of available cameras
+    std::string m_selectedCamera;                 ///< Currently selected camera for wavefront sensing
+    
+    // Mode Specification
+    int m_startModeIndex;                         ///< Starting mode index to optimize
+    int m_endModeIndex;                           ///< Ending mode index to optimize
+    
+    // Algorithm Parameters (from console_comprehensive)
+    double m_psfCoreRadiusPixels;        ///< Radius of the PSF core to measure
+    double m_searchRange;                ///< Range of values in microns for grid search
+    int m_nSteps;                        ///< Number of points to sample in grid search
+    int m_nRepeats;                      ///< Number of sweeps
+    int m_nClusterRepeats;               ///< Number of times to repeat a cluster of modes
+    int m_nSeqRepeat;                    ///< Number of times to repeat optimization of all modes
+    int m_nImages;                       ///< Number of images to collect from shmim
+    int m_cenX;                          ///< Fixed PSF centroid X value
+    int m_cenY;                          ///< Fixed PSF centroid Y value
+    int m_skipFrames;                    ///< Number of frames to skip
+    bool m_resetToZero;                  ///< Ignore current mode value and optimize about 0
+    bool m_ignoreFocus;                  ///< Skip focus mode optimization
+    
+    // Optimization Parameters
+    double m_targetLatency;              ///< Target latency between DM and camera (microseconds)
+    double m_latencyTolerance;           ///< Tolerance around target latency (microseconds)
+    bool m_autoOptimizeLatency;          ///< Whether to automatically optimize latency
+    int m_maxIterations;                 ///< Maximum number of optimization iterations
+    double m_convergenceThreshold;       ///< Convergence threshold for optimization
+    bool m_adaptiveStepSize;             ///< Whether to use adaptive step sizes
     
     ///@}
 
@@ -127,40 +159,73 @@ protected:
       * @{
       */
 
-    pcf::IndiProperty m_indiP_availableCameras;
+    // DM Device Selection
+    pcf::IndiProperty m_indiP_availableDMs;
+    pcf::IndiProperty m_indiP_selectedDM;
+    pcf::IndiProperty m_indiP_dmDeviceName;
+    pcf::IndiProperty m_indiP_dmShmimName;
 
+    // Camera Selection
+    pcf::IndiProperty m_indiP_availableCameras;
+    pcf::IndiProperty m_indiP_selectedCamera;
+
+    // Mode Specification
+    pcf::IndiProperty m_indiP_startModeIndex;
+    pcf::IndiProperty m_indiP_endModeIndex;
+
+    // Algorithm Parameters
+    pcf::IndiProperty m_indiP_psfCoreRadiusPixels;
+    pcf::IndiProperty m_indiP_nSteps;
+    pcf::IndiProperty m_indiP_nRepeats;
+    pcf::IndiProperty m_indiP_nClusterRepeats;
+    pcf::IndiProperty m_indiP_nSeqRepeat;
+    pcf::IndiProperty m_indiP_nImages;
+    pcf::IndiProperty m_indiP_cenX;
+    pcf::IndiProperty m_indiP_cenY;
+    pcf::IndiProperty m_indiP_skipFrames;
+    pcf::IndiProperty m_indiP_resetToZero;
+    pcf::IndiProperty m_indiP_ignoreFocus;
+
+    // Optimization Control
     pcf::IndiProperty m_indiP_optimizationStatus;
     pcf::IndiProperty m_indiP_results;
+    pcf::IndiProperty m_indiP_startOptimization;
+    pcf::IndiProperty m_indiP_stopOptimization;
 
     // Algorithm-specific INDI properties
     pcf::IndiProperty m_indiP_targetLatency;
     pcf::IndiProperty m_indiP_autoOptimizeLatency;
-    pcf::IndiProperty m_indiP_startOptimization;
-    pcf::IndiProperty m_indiP_stopOptimization;
-
-    // Algorithm-specific parameters
-    double m_targetLatency;               ///< Target latency between DM and camera (microseconds)
-    double m_latencyTolerance;            ///< Tolerance around target latency (microseconds)
-    bool m_autoOptimizeLatency;           ///< Whether to automatically optimize latency
-    
-    // Optimization parameters
-    int m_maxIterations;                  ///< Maximum number of optimization iterations
-    double m_convergenceThreshold;        ///< Convergence threshold for optimization
-    bool m_adaptiveStepSize;              ///< Whether to use adaptive step sizes
 
     // Callback declarations for dmWavefrontControl properties
-
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeAmplitude);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_wfsCamera);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadius);
+
+    // Callback declarations for eyeDoctor-specific properties
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_availableDMs);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedDM);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedCamera);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startModeIndex);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_endModeIndex);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadiusPixels);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_searchRange);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nSteps);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nRepeats);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nClusterRepeats);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nSeqRepeat);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nImages);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_cenX);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_cenY);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_skipFrames);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_resetToZero);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_ignoreFocus);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_targetLatency);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_autoOptimizeLatency);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_optimizationStatus);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startOptimization);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_stopOptimization);
-
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_optimizationStatus);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_results);
 
 
     ///@}
@@ -178,42 +243,115 @@ protected:
 private:
     int updateOptimizationStatus();
     int updateResults();
+    
+    // Dynamic configuration methods for dmWavefrontControl
+    int updateDMConfiguration();
+    int updateCameraConfiguration();
+    int updateSearchParameters();
+    
+    // DM device mapping
+    struct DMDeviceInfo {
+        std::string deviceName;
+        std::string shmimName;
+        std::string description;
+    };
+    std::map<std::string, DMDeviceInfo> m_dmDeviceMap;
 
 
 };
 
 eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
 {
-    m_optimizationInProgress = false;
-    m_measurementComplete = false;
-    m_currentModeIndex = 0;
-    m_totalModes = 0;
+    // Initialize DM device parameters
+    m_availableDMs = {"wooferModes", "ncpcModes", "tweeterModes", "kiloModes"};
+    m_selectedDM = "tweeterModes";
+    m_dmDeviceName = "dmtweeter";
+    m_dmShmimName = "dm01disp";
     
-    // Initialize algorithm-specific parameters
+    // Initialize camera parameters
+    m_availableCameras = {"camsci1", "camsci2", "camlowfs", "camtip", "camflowf"};
+    m_selectedCamera = "camsci1";
+    
+    // Initialize mode specification
+    m_startModeIndex = 1;
+    m_endModeIndex = 5;
+    
+    // Initialize algorithm parameters
+    m_psfCoreRadiusPixels = 5.0;
+    m_searchRange = 0.1;
+    m_nSteps = 20;
+    m_nRepeats = 3;
+    m_nClusterRepeats = 1;
+    m_nSeqRepeat = 1;
+    m_nImages = 1;
+    m_cenX = 64;
+    m_cenY = 64;
+    m_skipFrames = 0;
+    m_resetToZero = false;
+    m_ignoreFocus = false;
+    
+    // Initialize optimization parameters
     m_targetLatency = 1000; // 1ms default
     m_latencyTolerance = 100; // 100 microseconds tolerance
     m_autoOptimizeLatency = false;
-    
-    // Initialize optimization parameters
     m_maxIterations = 100;
     m_convergenceThreshold = 1e-6;
     m_adaptiveStepSize = true;
+    
+    // Initialize state management
+    m_optimizationInProgress = false;
+    m_measurementComplete = false;
+    m_currentModeIndex = 0;
+    m_totalModes = 1; // Placeholder - parse from m_modesToOptimize
+    
+    // Initialize DM device mapping
+    m_dmDeviceMap = {
+        {"wooferModes", {"dmwoofer", "dm00disp", "DM Woofer"}},
+        {"ncpcModes", {"dmncpc", "dm02disp", "DM NCPc"}},
+        {"tweeterModes", {"dmtweeter", "dm01disp", "DM Tweeter"}},
+        {"kiloModes", {"dmkilo", "dm00disp", "DM Kilo"}}
+    };
     
     return;
 }
 
 void eyeDoctor::setupConfig()
 {
+    // Call base class setupConfig first
+    MagAOXApp<true>::setupConfig();
+    
     DMWAVEFRONTCONTROL_SETUP_CONFIG(config);
 
-    config.add("eyedoctor.modesToOptimize", "", "eyedoctor.modesToOptimize", argType::Required, "eyedoctor", "modesToOptimize", false, "string", "Modes to optimize");
-    config.add("eyedoctor.availableCameras", "", "eyedoctor.availableCameras", argType::Required, "eyedoctor", "availableCameras", false, "vector<string>", "List of available cameras");
+    // DM Device Selection
+    config.add("eyedoctor.availableDMs", "", "eyedoctor.availableDMs", argType::Required, "eyedoctor", "availableDMs", false, "vector<string>", "List of available DM devices");
+    config.add("eyedoctor.selectedDM", "", "eyedoctor.selectedDM", argType::Required, "eyedoctor", "selectedDM", false, "string", "Selected DM device");
     
-    // Algorithm-specific configuration
+    // Camera Selection
+    config.add("eyedoctor.availableCameras", "", "eyedoctor.availableCameras", argType::Required, "eyedoctor", "availableCameras", false, "vector<string>", "List of available cameras");
+    config.add("eyedoctor.selectedCamera", "", "eyedoctor.selectedCamera", argType::Required, "eyedoctor", "selectedCamera", false, "string", "Selected camera for wavefront sensing");
+    
+    // Mode Specification
+    config.add("eyedoctor.startModeIndex", "", "eyedoctor.startModeIndex", argType::Required, "eyedoctor", "startModeIndex", false, "int", "Starting mode index to optimize");
+    config.add("eyedoctor.endModeIndex", "", "eyedoctor.endModeIndex", argType::Required, "eyedoctor", "endModeIndex", false, "int", "Ending mode index to optimize");
+    
+    // Algorithm Parameters
+    config.add("eyedoctor.psfCoreRadiusPixels", "", "eyedoctor.psfCoreRadiusPixels", argType::Required, "eyedoctor", "psfCoreRadiusPixels", false, "float", "Radius of the PSF core to measure");
+    config.add("eyedoctor.searchRange", "", "eyedoctor.searchRange", argType::Required, "eyedoctor", "searchRange", false, "float", "Range of values in microns for grid search");
+    config.add("eyedoctor.nSteps", "", "eyedoctor.nSteps", argType::Required, "eyedoctor", "nSteps", false, "int", "Number of points to sample in grid search");
+    config.add("eyedoctor.nRepeats", "", "eyedoctor.nRepeats", argType::Required, "eyedoctor", "nRepeats", false, "int", "Number of sweeps");
+    config.add("eyedoctor.nClusterRepeats", "", "eyedoctor.nClusterRepeats", argType::Required, "eyedoctor", "nClusterRepeats", false, "int", "Number of times to repeat a cluster of modes");
+    config.add("eyedoctor.nSeqRepeat", "", "eyedoctor.nSeqRepeat", argType::Required, "eyedoctor", "nSeqRepeat", false, "int", "Number of times to repeat optimization of all modes");
+    config.add("eyedoctor.nImages", "", "eyedoctor.nImages", argType::Required, "eyedoctor", "nImages", false, "int", "Number of images to collect from shmim");
+    config.add("eyedoctor.cenX", "", "eyedoctor.cenX", argType::Required, "eyedoctor", "cenX", false, "int", "Fixed PSF centroid X value");
+    config.add("eyedoctor.cenY", "", "eyedoctor.cenY", argType::Required, "eyedoctor", "cenY", false, "int", "Fixed PSF centroid Y value");
+    config.add("eyedoctor.skipFrames", "", "eyedoctor.skipFrames", argType::Required, "eyedoctor", "skipFrames", false, "int", "Number of frames to skip");
+    config.add("eyedoctor.resetToZero", "", "eyedoctor.resetToZero", argType::Required, "eyedoctor", "resetToZero", false, "bool", "Ignore current mode value and optimize about 0");
+    config.add("eyedoctor.ignoreFocus", "", "eyedoctor.ignoreFocus", argType::Required, "eyedoctor", "ignoreFocus", false, "bool", "Skip focus mode optimization");
+    
+    // Optimization Parameters
     config.add("eyedoctor.targetLatency", "", "eyedoctor.targetLatency", argType::Required, "eyedoctor", "targetLatency", false, "float", "Target latency between DM and camera (microseconds)");
     config.add("eyedoctor.latencyTolerance", "", "eyedoctor.latencyTolerance", argType::Required, "eyedoctor", "latencyTolerance", false, "float", "Tolerance around target latency (microseconds)");
     config.add("eyedoctor.autoOptimizeLatency", "", "eyedoctor.autoOptimizeLatency", argType::Required, "eyedoctor", "autoOptimizeLatency", false, "bool", "Whether to automatically optimize latency");
-    
     config.add("eyedoctor.maxIterations", "", "eyedoctor.maxIterations", argType::Required, "eyedoctor", "maxIterations", false, "int", "Maximum number of optimization iterations");
     config.add("eyedoctor.convergenceThreshold", "", "eyedoctor.convergenceThreshold", argType::Required, "eyedoctor", "convergenceThreshold", false, "float", "Convergence threshold for optimization");
     config.add("eyedoctor.adaptiveStepSize", "", "eyedoctor.adaptiveStepSize", argType::Required, "eyedoctor", "adaptiveStepSize", false, "bool", "Whether to use adaptive step sizes");
@@ -223,10 +361,33 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
 {
     DMWAVEFRONTCONTROL_LOAD_CONFIG(_config);
 
-    _config(m_modesToOptimize, "eyedoctor.modesToOptimize");
+    // DM Device Selection
+    _config(m_availableDMs, "eyedoctor.availableDMs");
+    _config(m_selectedDM, "eyedoctor.selectedDM");
+    
+    // Camera Selection
     _config(m_availableCameras, "eyedoctor.availableCameras");
-
-    // Load algorithm-specific configuration
+    _config(m_selectedCamera, "eyedoctor.selectedCamera");
+    
+    // Mode Specification
+    _config(m_startModeIndex, "eyedoctor.startModeIndex");
+    _config(m_endModeIndex, "eyedoctor.endModeIndex");
+    
+    // Algorithm Parameters
+    _config(m_psfCoreRadiusPixels, "eyedoctor.psfCoreRadiusPixels");
+    _config(m_searchRange, "eyedoctor.searchRange");
+    _config(m_nSteps, "eyedoctor.nSteps");
+    _config(m_nRepeats, "eyedoctor.nRepeats");
+    _config(m_nClusterRepeats, "eyedoctor.nClusterRepeats");
+    _config(m_nSeqRepeat, "eyedoctor.nSeqRepeat");
+    _config(m_nImages, "eyedoctor.nImages");
+    _config(m_cenX, "eyedoctor.cenX");
+    _config(m_cenY, "eyedoctor.cenY");
+    _config(m_skipFrames, "eyedoctor.skipFrames");
+    _config(m_resetToZero, "eyedoctor.resetToZero");
+    _config(m_ignoreFocus, "eyedoctor.ignoreFocus");
+    
+    // Optimization Parameters
     _config(m_targetLatency, "eyedoctor.targetLatency");
     _config(m_latencyTolerance, "eyedoctor.latencyTolerance");
     _config(m_autoOptimizeLatency, "eyedoctor.autoOptimizeLatency");
@@ -234,17 +395,41 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
     _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
 
-    // Set default selected camera to first available
-    if(m_availableCameras.size() > 0)
-    {
-        m_selectedCamera = m_availableCameras[0];
+    // Map DM device selection to actual device names and shared memory
+    if(m_selectedDM == "wooferModes") {
+        m_dmDeviceName = "dmwoofer";
+        m_dmShmimName = "dm00disp";
+    } else if(m_selectedDM == "ncpcModes") {
+        m_dmDeviceName = "dmncpc";
+        m_dmShmimName = "dm02disp";
+    } else if(m_selectedDM == "tweeterModes") {
+        m_dmDeviceName = "dmtweeter";
+        m_dmShmimName = "dm01disp";
+    } else if(m_selectedDM == "kiloModes") {
+        m_dmDeviceName = "dmkilo";
+        m_dmShmimName = "dm00disp";
+    } else {
+        // Default to tweeter if invalid selection
+        m_dmDeviceName = "dmtweeter";
+        m_dmShmimName = "dm01disp";
     }
 
+    // Calculate total number of modes from start and end indices
+    m_totalModes = m_endModeIndex - m_startModeIndex + 1;
+    
+    // Configure dmWavefrontControl base class parameters
+    // Note: This would require the base class to have update methods
+    // For now, we'll set these in the setupINDI method
+    
     return 0;
 }
 
 void eyeDoctor::loadConfig()
 {
+    // Call base class loadConfig first
+    MagAOXApp<true>::loadConfig();
+    
+    // Then load our specific configuration
     loadConfigImpl(config);
 }
 
@@ -252,22 +437,81 @@ int eyeDoctor::appStartup()
 {
     DMWAVEFRONTCONTROL_APP_STARTUP;
 
+    // Setup Available DMs INDI Property (Read-only)
+    m_indiP_availableDMs = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_availableDMs.setDevice(this->configName());
+    m_indiP_availableDMs.setName("availableDMs");
+    m_indiP_availableDMs.setGroup("main");
+    m_indiP_availableDMs.setLabel("Available DM Devices");
+    m_indiP_availableDMs.add(pcf::IndiElement("current", m_selectedDM));
+    if(registerIndiPropertyReadOnly(m_indiP_availableDMs) < 0) return -1;
+
+    // Setup DM Device Selection INDI Property
+    m_indiP_selectedDM = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_selectedDM.setDevice(this->configName());
+    m_indiP_selectedDM.setName("selectedDM");
+    m_indiP_selectedDM.setGroup("main");
+    m_indiP_selectedDM.setLabel("Selected DM Device");
+    m_indiP_selectedDM.add(pcf::IndiElement("current", m_selectedDM));
+    m_indiP_selectedDM.add(pcf::IndiElement("target", m_selectedDM));
+    if(registerIndiPropertyNew(m_indiP_selectedDM, &eyeDoctor::st_newCallBack_m_indiP_selectedDM) < 0) return -1;
+
+    // Setup Camera Selection INDI Property
+    m_indiP_selectedCamera = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_selectedCamera.setDevice(this->configName());
+    m_indiP_selectedCamera.setName("selectedCamera");
+    m_indiP_selectedCamera.setGroup("main");
+    m_indiP_selectedCamera.setLabel("Selected Camera");
+    m_indiP_selectedCamera.add(pcf::IndiElement("current", m_selectedCamera));
+    m_indiP_selectedCamera.add(pcf::IndiElement("target", m_selectedCamera));
+    if(registerIndiPropertyNew(m_indiP_selectedCamera, &eyeDoctor::st_newCallBack_m_indiP_selectedCamera) < 0) return -1;
+
+    // Setup Mode Range INDI Properties
+    this->createStandardIndiNumber(m_indiP_startModeIndex, "startModeIndex", 1, 100, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_startModeIndex, &eyeDoctor::st_newCallBack_m_indiP_startModeIndex) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_endModeIndex, "endModeIndex", 1, 100, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_endModeIndex, &eyeDoctor::st_newCallBack_m_indiP_endModeIndex) < 0) return -1;
+
+    // Setup Algorithm Parameters INDI Properties
+    this->createStandardIndiNumber(m_indiP_psfCoreRadiusPixels, "psfCoreRadiusPixels", 1.0, 50.0, 0.1, "%0.1f");
+    if(registerIndiPropertyNew(m_indiP_psfCoreRadiusPixels, &eyeDoctor::st_newCallBack_m_indiP_psfCoreRadiusPixels) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_nSteps, "nSteps", 5, 100, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_nSteps, &eyeDoctor::st_newCallBack_m_indiP_nSteps) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_nRepeats, "nRepeats", 1, 10, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_nRepeats, &eyeDoctor::st_newCallBack_m_indiP_nRepeats) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_nImages, "nImages", 1, 10, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_nImages, &eyeDoctor::st_newCallBack_m_indiP_nImages) < 0) return -1;
+
     // Setup eyeDoctor-specific INDI properties
     m_indiP_availableCameras = pcf::IndiProperty(pcf::IndiProperty::Text);
     m_indiP_availableCameras.setDevice(this->configName());
     m_indiP_availableCameras.setName("availableCameras");
     m_indiP_availableCameras.setGroup("main");
     m_indiP_availableCameras.setLabel("Available Cameras");
-    m_indiP_availableCameras.add(pcf::IndiElement("current"));
-    m_indiP_availableCameras["current"].setValue(m_selectedCamera);
+    m_indiP_availableCameras.add(pcf::IndiElement("current", m_selectedCamera));
     if(registerIndiPropertyReadOnly(m_indiP_availableCameras) < 0) return -1;
 
-    registerIndiPropertyReadOnly(m_indiP_optimizationStatus, "optimizationStatus", pcf::IndiProperty::Text, pcf::IndiProperty::ReadOnly, pcf::IndiProperty::Idle);
-    m_indiP_optimizationStatus.add({"status", "Idle"});
+    m_indiP_results = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_results.setDevice(this->configName());
+    m_indiP_results.setName("results");
+    m_indiP_results.setGroup("main");
+    m_indiP_results.setLabel("Results");
+    m_indiP_results.add(pcf::IndiElement("current", "No results yet"));
+    if(registerIndiPropertyReadOnly(m_indiP_results) < 0) return -1;
 
-    registerIndiPropertyReadOnly(m_indiP_results, "results", pcf::IndiProperty::Number, pcf::IndiProperty::ReadOnly, pcf::IndiProperty::Idle);
-    m_indiP_results.add({"progress", 0.0});
-    m_indiP_results.add({"currentMode", 0});
+    m_indiP_optimizationStatus = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_optimizationStatus.setDevice(this->configName());
+    m_indiP_optimizationStatus.setName("optimizationStatus");
+    m_indiP_optimizationStatus.setGroup("main");
+    m_indiP_optimizationStatus.setLabel("Optimization Status");
+    m_indiP_optimizationStatus.add(pcf::IndiElement("current", "Idle"));
+    if(registerIndiPropertyReadOnly(m_indiP_optimizationStatus) < 0) return -1;
+
+
 
     // Create algorithm-specific INDI properties
     this->createStandardIndiNumber(m_indiP_targetLatency, "targetLatency", 100, 10000, 100, "%0.0f");
@@ -280,6 +524,11 @@ int eyeDoctor::appStartup()
     if(this->registerIndiPropertyNew(m_indiP_autoOptimizeLatency, &eyeDoctor::st_newCallBack_m_indiP_autoOptimizeLatency) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_startOptimization, &eyeDoctor::st_newCallBack_m_indiP_startOptimization) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_stopOptimization, &eyeDoctor::st_newCallBack_m_indiP_stopOptimization) < 0) return -1;
+
+    // Configure dmWavefrontControl base class with current settings
+    updateDMConfiguration();
+    updateCameraConfiguration();
+    updateSearchParameters();
 
     return 0;
 }
@@ -375,8 +624,8 @@ int eyeDoctor::calculateOptimizationResult()
 int eyeDoctor::updateOptimizationStatus()
 {
     std::string status = m_optimizationInProgress ? "Running" : "Idle";
-    m_indiP_optimizationStatus["status"] = status;
-    updateIfChanged(m_indiP_optimizationStatus, "status", status);
+    m_indiP_optimizationStatus["current"] = status;
+    updateIfChanged(m_indiP_optimizationStatus, "current", status);
     return 0;
 }
 
@@ -387,12 +636,30 @@ int eyeDoctor::updateResults()
     return 0;
 }
 
+// Dynamic configuration methods for dmWavefrontControl
+int eyeDoctor::updateDMConfiguration()
+{
+    // This method will update the dmWavefrontControl parameters based on INDI properties
+    // For example, if m_dmDeviceName or m_dmShmimName changes, update the dmWavefrontControl
+    // This is a placeholder and would require actual implementation of dmWavefrontControl::updateConfig
+    return 0;
+}
 
+int eyeDoctor::updateCameraConfiguration()
+{
+    // This method will update the camera selection based on INDI properties
+    // For example, if m_selectedCamera changes, update the dmWavefrontControl
+    // This is a placeholder and would require actual implementation of dmWavefrontControl::updateConfig
+    return 0;
+}
 
-
-
-
-
+int eyeDoctor::updateSearchParameters()
+{
+    // This method will update the search parameters (psfCoreRadiusPixels, searchRange, nSteps)
+    // based on INDI properties.
+    // This is a placeholder and would require actual implementation of dmWavefrontControl::updateConfig
+    return 0;
+}
 
 
 
@@ -465,6 +732,140 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_psfCoreRadius)(const pcf::IndiProperty 
     }
 
     // Update the dmWavefrontControl property
+    return 0;
+}
+
+// Callback definitions for eyeDoctor-specific properties
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedDM)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedDM, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_selectedDM, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the selected DM and reconfigure
+    m_selectedDM = target;
+    updateDMConfiguration();
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedCamera)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedCamera, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_selectedCamera, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the selected camera and reconfigure
+    m_selectedCamera = target;
+    updateCameraConfiguration();
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_startModeIndex)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_startModeIndex, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_startModeIndex, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the start mode index and recalculate total modes
+    m_startModeIndex = target;
+    m_totalModes = m_endModeIndex - m_startModeIndex + 1;
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_endModeIndex)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_endModeIndex, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_endModeIndex, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the end mode index and recalculate total modes
+    m_endModeIndex = target;
+    m_totalModes = m_endModeIndex - m_startModeIndex + 1;
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_psfCoreRadiusPixels)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_psfCoreRadiusPixels, ipRecv)
+   
+    float target;
+    if(indiTargetUpdate(m_indiP_psfCoreRadiusPixels, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the PSF core radius and reconfigure
+    m_psfCoreRadiusPixels = target;
+    updateSearchParameters();
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nSteps)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_nSteps, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_nSteps, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the number of steps
+    m_nSteps = target;
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nRepeats)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_nRepeats, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_nRepeats, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the number of repeats
+    m_nRepeats = target;
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nImages)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_nImages, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_nImages, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Update the number of images
+    m_nImages = target;
+    
     return 0;
 }
 
