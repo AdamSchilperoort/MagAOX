@@ -922,7 +922,8 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     int height = naxes[1];  // NAXIS2
                     int numModes = naxes[2]; // NAXIS3
                     
-                    modeset.modes.resize(numModes, height, width);
+                    // eigenCube::resize takes (rows, cols, planes), not (planes, rows, cols)
+                    modeset.modes.resize(height, width, numModes);
                     
                     // Read the data plane by plane
                     // FITS pixel coordinates: [x, y, z] = [width, height, plane]
@@ -937,13 +938,25 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                         
                         if (fits_read_pix(fptr, TFLOAT, fpixel, width * height, 0, buffer.data(), 0, &status) == 0) {
                             // Copy to eigen matrix
-                            // Buffer is in row-major order: buffer[i] = data[y*width + x]
+                            // fits_read_pix reads data in FORTRAN order: x varies fastest
+                            // Buffer layout: buffer[0] = (x=0,y=0), buffer[1] = (x=1,y=0), ..., buffer[width-1] = (x=width-1,y=0), buffer[width] = (x=0,y=1), ...
+                            // So buffer[i] = buffer[y*width + x] where x=i%width, y=i/width
                             for (int y = 0; y < height; ++y) {
                                 for (int x = 0; x < width; ++x) {
-                                    modeset.modes.image(p)(y, x) = buffer[y * width + x];
+                                    int bufferIndex = y * width + x;
+                                    if (bufferIndex >= 0 && bufferIndex < static_cast<int>(buffer.size())) {
+                                        modeset.modes.image(p)(y, x) = buffer[bufferIndex];
+                                    } else {
+                                        derived().template log<software_error>({__FILE__, __LINE__, 
+                                            "Buffer index out of range: " + std::to_string(bufferIndex) + " >= " + std::to_string(buffer.size())});
+                                        status = -1;
+                                        break;
+                                    }
                                 }
+                                if (status != 0) break;
                             }
                         } else {
+                            derived().template log<software_error>({__FILE__, __LINE__, "Failed to read FITS pixels for plane " + std::to_string(p)});
                             status = 0; // Reset status for next iteration
                         }
                     }
