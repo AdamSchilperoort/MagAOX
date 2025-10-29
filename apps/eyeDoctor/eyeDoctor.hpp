@@ -554,43 +554,72 @@ int eyeDoctor::appStartup()
 
     // Setup Mode Range INDI Properties
     this->createStandardIndiNumber(m_indiP_startModeIndex, "startModeIndex", 1, 100, 1, "%d");
+    m_indiP_startModeIndex["current"] = m_startModeIndex;
+    m_indiP_startModeIndex["target"] = m_startModeIndex;
     if(registerIndiPropertyNew(m_indiP_startModeIndex, &eyeDoctor::st_newCallBack_m_indiP_startModeIndex) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_endModeIndex, "endModeIndex", 1, 100, 1, "%d");
+    m_indiP_endModeIndex["current"] = m_endModeIndex;
+    m_indiP_endModeIndex["target"] = m_endModeIndex;
     if(registerIndiPropertyNew(m_indiP_endModeIndex, &eyeDoctor::st_newCallBack_m_indiP_endModeIndex) < 0) return -1;
 
     // Setup Algorithm Parameters INDI Properties
     this->createStandardIndiNumber(m_indiP_psfCoreRadiusPixels, "psfCoreRadiusPixels", 1.0, 50.0, 0.1, "%0.1f");
+    m_indiP_psfCoreRadiusPixels["current"] = m_psfCoreRadiusPixels;
+    m_indiP_psfCoreRadiusPixels["target"] = m_psfCoreRadiusPixels;
     if(registerIndiPropertyNew(m_indiP_psfCoreRadiusPixels, &eyeDoctor::st_newCallBack_m_indiP_psfCoreRadiusPixels) < 0) return -1;
 
+    this->createStandardIndiNumber(m_indiP_searchRange, "searchRange", 0.01, 10.0, 0.01, "%0.3f");
+    m_indiP_searchRange["current"] = m_searchRange;
+    m_indiP_searchRange["target"] = m_searchRange;
+    if(registerIndiPropertyNew(m_indiP_searchRange, &eyeDoctor::st_newCallBack_m_indiP_searchRange) < 0) return -1;
+
     this->createStandardIndiNumber(m_indiP_nSteps, "nSteps", 5, 100, 1, "%d");
+    m_indiP_nSteps["current"] = m_nSteps;
+    m_indiP_nSteps["target"] = m_nSteps;
     if(registerIndiPropertyNew(m_indiP_nSteps, &eyeDoctor::st_newCallBack_m_indiP_nSteps) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_nRepeats, "nRepeats", 1, 10, 1, "%d");
+    m_indiP_nRepeats["current"] = m_nRepeats;
+    m_indiP_nRepeats["target"] = m_nRepeats;
     if(registerIndiPropertyNew(m_indiP_nRepeats, &eyeDoctor::st_newCallBack_m_indiP_nRepeats) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_nImages, "nImages", 1, 10, 1, "%d");
+    m_indiP_nImages["current"] = m_nImages;
+    m_indiP_nImages["target"] = m_nImages;
     if(registerIndiPropertyNew(m_indiP_nImages, &eyeDoctor::st_newCallBack_m_indiP_nImages) < 0) return -1;
     
     this->createStandardIndiNumber(m_indiP_nClusterRepeats, "nClusterRepeats", 1, 10, 1, "%d");
+    m_indiP_nClusterRepeats["current"] = m_nClusterRepeats;
+    m_indiP_nClusterRepeats["target"] = m_nClusterRepeats;
     if(registerIndiPropertyNew(m_indiP_nClusterRepeats, &eyeDoctor::st_newCallBack_m_indiP_nClusterRepeats) < 0) return -1;
     
     this->createStandardIndiNumber(m_indiP_nSeqRepeat, "nSeqRepeat", 1, 10, 1, "%d");
+    m_indiP_nSeqRepeat["current"] = m_nSeqRepeat;
+    m_indiP_nSeqRepeat["target"] = m_nSeqRepeat;
     if(registerIndiPropertyNew(m_indiP_nSeqRepeat, &eyeDoctor::st_newCallBack_m_indiP_nSeqRepeat) < 0) return -1;
     
     this->createStandardIndiNumber(m_indiP_cenX, "cenX", 0, 1000, 1, "%d");
+    m_indiP_cenX["current"] = m_cenX;
+    m_indiP_cenX["target"] = m_cenX;
     if(registerIndiPropertyNew(m_indiP_cenX, &eyeDoctor::st_newCallBack_m_indiP_cenX) < 0) return -1;
     
     this->createStandardIndiNumber(m_indiP_cenY, "cenY", 0, 1000, 1, "%d");
+    m_indiP_cenY["current"] = m_cenY;
+    m_indiP_cenY["target"] = m_cenY;
     if(registerIndiPropertyNew(m_indiP_cenY, &eyeDoctor::st_newCallBack_m_indiP_cenY) < 0) return -1;
     
     this->createStandardIndiNumber(m_indiP_skipFrames, "skipFrames", 0, 100, 1, "%d");
+    m_indiP_skipFrames["current"] = m_skipFrames;
+    m_indiP_skipFrames["target"] = m_skipFrames;
     if(registerIndiPropertyNew(m_indiP_skipFrames, &eyeDoctor::st_newCallBack_m_indiP_skipFrames) < 0) return -1;
     
     this->createStandardIndiToggleSw(m_indiP_resetToZero, "resetToZero", "Reset To Zero Before Optimization");
+    updateSwitchIfChanged(m_indiP_resetToZero, "toggle", m_resetToZero ? pcf::IndiElement::On : pcf::IndiElement::Off);
     if(registerIndiPropertyNew(m_indiP_resetToZero, &eyeDoctor::st_newCallBack_m_indiP_resetToZero) < 0) return -1;
     
     this->createStandardIndiToggleSw(m_indiP_ignoreFocus, "ignoreFocus", "Ignore Focus Mode");
+    updateSwitchIfChanged(m_indiP_ignoreFocus, "toggle", m_ignoreFocus ? pcf::IndiElement::On : pcf::IndiElement::Off);
     if(registerIndiPropertyNew(m_indiP_ignoreFocus, &eyeDoctor::st_newCallBack_m_indiP_ignoreFocus) < 0) return -1;
 
     // Setup eyeDoctor-specific INDI properties
@@ -628,9 +657,15 @@ int eyeDoctor::appStartup()
 
     // Create algorithm-specific INDI properties
     this->createStandardIndiNumber(m_indiP_targetLatency, "targetLatency", 100, 10000, 100, "%0.0f");
+    m_indiP_targetLatency["current"] = m_targetLatency;
+    m_indiP_targetLatency["target"] = m_targetLatency;
+    
     this->createStandardIndiToggleSw(m_indiP_autoOptimizeLatency, "autoOptimizeLatency", "Auto Optimize Latency");
+    updateSwitchIfChanged(m_indiP_autoOptimizeLatency, "toggle", m_autoOptimizeLatency ? pcf::IndiElement::On : pcf::IndiElement::Off);
+    
     this->createStandardIndiToggleSw(m_indiP_runOptimization, "runOptimization", "Run Eye Doctor Optimization");
     m_indiP_runOptimization.setState(pcf::IndiProperty::Idle);
+    updateSwitchIfChanged(m_indiP_runOptimization, "toggle", pcf::IndiElement::Off);
 
     // Register algorithm-specific INDI properties
     if(this->registerIndiPropertyNew(m_indiP_targetLatency, &eyeDoctor::st_newCallBack_m_indiP_targetLatency) < 0) return -1;
