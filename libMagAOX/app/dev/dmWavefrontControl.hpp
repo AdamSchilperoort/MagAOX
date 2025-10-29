@@ -916,26 +916,35 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                 fits_get_img_size(fptr, 3, naxes, &status);
                 
                 if (status == 0 && naxis == 3) {
-                    // 3D FITS file: planes x height x width
-                    int numModes = naxes[0];
-                    int height = naxes[1];
-                    int width = naxes[2];
+                    // 3D FITS file: FITS stores as [width, height, planes] in FORTRAN order
+                    // NAXIS1 = width, NAXIS2 = height, NAXIS3 = number of modes/planes
+                    int width = naxes[0];   // NAXIS1
+                    int height = naxes[1];  // NAXIS2
+                    int numModes = naxes[2]; // NAXIS3
                     
                     modeset.modes.resize(numModes, height, width);
                     
-                    // Read the data
-                    long fpixel[3] = {1, 1, 1};
+                    // Read the data plane by plane
+                    // FITS pixel coordinates: [x, y, z] = [width, height, plane]
+                    long fpixel[3];
                     std::vector<float> buffer(width * height);
                     
                     for (int p = 0; p < numModes; ++p) {
-                        fpixel[0] = p + 1;
+                        // Set starting pixel: x=1, y=1, z=plane+1 (1-indexed)
+                        fpixel[0] = 1;
+                        fpixel[1] = 1;
+                        fpixel[2] = p + 1;
+                        
                         if (fits_read_pix(fptr, TFLOAT, fpixel, width * height, 0, buffer.data(), 0, &status) == 0) {
                             // Copy to eigen matrix
+                            // Buffer is in row-major order: buffer[i] = data[y*width + x]
                             for (int y = 0; y < height; ++y) {
                                 for (int x = 0; x < width; ++x) {
                                     modeset.modes.image(p)(y, x) = buffer[y * width + x];
                                 }
                             }
+                        } else {
+                            status = 0; // Reset status for next iteration
                         }
                     }
                     
@@ -982,7 +991,18 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     }
                     
                     fits_close_file(fptr, &status);
+                    
+                    // Ensure name is set correctly
+                    modeset.name = name;
+                    modeset.filename = filename;
+                    
+                    // Add to modesets list
+                    m_modeSets.push_back(modeset);
+                    size_t modesetIndex = m_modeSets.size() - 1;
+                    m_modeSetMap[name] = modesetIndex;
+                    
                     derived().template log<text_log>("Loaded modeset '" + name + "' with " + std::to_string(numModes) + " modes from FITS file: " + filename);
+                    derived().template log<text_log>("Modeset added to map at index " + std::to_string(modesetIndex) + ", map size: " + std::to_string(m_modeSetMap.size()));
                     return 0;
                 } else if (status == 0 && naxis == 2) {
                     // 2D FITS file: treat as single mode
@@ -1012,6 +1032,11 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     modeset.modeMax.resize(1, 10.0);
                     
                     fits_close_file(fptr, &status);
+                    
+                    // Add to modesets list
+                    m_modeSets.push_back(modeset);
+                    m_modeSetMap[name] = m_modeSets.size() - 1;
+                    
                     derived().template log<text_log>("Loaded modeset '" + name + "' with 1 mode from 2D FITS file: " + filename);
                     return 0;
                 }
