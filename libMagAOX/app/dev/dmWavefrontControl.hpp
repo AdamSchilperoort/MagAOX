@@ -720,11 +720,30 @@ template<class derivedT>
 int dmWavefrontControl<derivedT>::loadDMMetadata()
 {
     try {
-        // Load DM metadata from configuration file if specified
-        if (!m_dmMetadataFile.empty()) {
-            std::ifstream file(m_dmMetadataFile);
+        // Trim whitespace from metadata file name
+        std::string metadataFileTrimmed = m_dmMetadataFile;
+        if (!metadataFileTrimmed.empty()) {
+            // Trim leading/trailing whitespace
+            size_t first = metadataFileTrimmed.find_first_not_of(" \t\n\r");
+            if (first != std::string::npos) {
+                metadataFileTrimmed.erase(0, first);
+            } else {
+                metadataFileTrimmed.clear();
+            }
+            size_t last = metadataFileTrimmed.find_last_not_of(" \t\n\r");
+            if (last != std::string::npos && last + 1 < metadataFileTrimmed.length()) {
+                metadataFileTrimmed.erase(last + 1);
+            }
+        }
+        
+        // Log the metadata file value for debugging
+        derived().template log<text_log>("DM metadata_file config value: '" + m_dmMetadataFile + "' (trimmed: '" + metadataFileTrimmed + "')");
+        
+        // Load DM metadata from configuration file if specified and not empty
+        if (!metadataFileTrimmed.empty()) {
+            std::ifstream file(metadataFileTrimmed);
             if (!file.is_open()) {
-                derived().template log<software_error>({__FILE__, __LINE__, "Could not open DM metadata file: " + m_dmMetadataFile});
+                derived().template log<software_error>({__FILE__, __LINE__, "Could not open DM metadata file: " + metadataFileTrimmed});
                 return -1;
             }
             
@@ -749,7 +768,7 @@ int dmWavefrontControl<derivedT>::loadDMMetadata()
                     }
                 }
             }
-        } else {
+        } else if (metadataFileTrimmed.empty()) {
             // Use config parameters instead of file
             if (m_configNumActuators > 0) {
                 m_dmInfo.numActuators = m_configNumActuators;
@@ -1306,10 +1325,10 @@ void dmWavefrontControl<derivedT>::setupConfig(mx::app::appConfigurator &config)
                argType::Required, "dmWavefrontControl", "modes_to_optimize", false, "vector<string>", 
                "Specific modes to optimize (format: modeset:mode)");
     
-    // DM metadata configuration
+    // DM metadata configuration (optional - if empty, use config parameters)
     config.add("dmWavefrontControl.metadata_file", "", "dmWavefrontControl.metadata_file", 
-               argType::Required, "dmWavefrontControl", "metadata_file", false, "string", 
-               "DM metadata configuration file");
+               argType::Optional, "dmWavefrontControl", "metadata_file", false, "string", 
+               "DM metadata configuration file (optional, leave empty to use config parameters)");
     
     config.add("dmWavefrontControl.actuator_spacing", "", "dmWavefrontControl.actuator_spacing", 
                argType::Required, "dmWavefrontControl", "actuator_spacing", false, "float", 
@@ -1356,8 +1375,12 @@ void dmWavefrontControl<derivedT>::loadConfig(mx::app::appConfigurator &config)
     config(m_defaultModeSet, "dmWavefrontControl.default_modeset");
     config(m_modesToOptimize, "dmWavefrontControl.modes_to_optimize");
     
-    // Load DM metadata configuration
+    // Load DM metadata configuration (optional)
     config(m_dmMetadataFile, "dmWavefrontControl.metadata_file");
+    // If empty string, clear it
+    if (m_dmMetadataFile == "") {
+        m_dmMetadataFile.clear();
+    }
     
     // Load DM metadata parameters (used if metadata_file is empty)
     config(m_configNumActuators, "dmWavefrontControl.numActuators");
