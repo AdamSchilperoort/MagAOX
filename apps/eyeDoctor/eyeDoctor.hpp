@@ -578,10 +578,10 @@ int eyeDoctor::appStartup()
     m_indiP_psfCoreRadiusPixels["target"].set(m_psfCoreRadiusPixels);
     if(registerIndiPropertyNew(m_indiP_psfCoreRadiusPixels, &eyeDoctor::st_newCallBack_m_indiP_psfCoreRadiusPixels) < 0) return -1;
 
-    this->createStandardIndiNumber(m_indiP_searchRange, "searchRange", 0.01, 10.0, 0.01, "%0.3f");
+    // Note: searchRange is registered by dmWavefrontControl base class, so don't register it again here
+    // Just update the values after base class registration
     m_indiP_searchRange["current"].set(m_searchRange);
     m_indiP_searchRange["target"].set(m_searchRange);
-    if(registerIndiPropertyNew(m_indiP_searchRange, &eyeDoctor::st_newCallBack_m_indiP_searchRange) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_nSteps, "nSteps", 5, 100, 1, "%d");
     m_indiP_nSteps["current"].set(m_nSteps);
