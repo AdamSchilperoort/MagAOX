@@ -11,6 +11,10 @@
 #include <mx/improc/milkImage.hpp>
 #include <mx/improc/eigenCube.hpp>
 #include <sstream>
+#include <thread>
+#include <mutex>
+#include <sys/syscall.h>
+#include <unistd.h>
 using namespace mx::improc;
 
 #include "../../libMagAOX/libMagAOX.hpp" //Note this is included on command line to trigger pch
@@ -159,8 +163,7 @@ public:
     int analyzeWavefrontSensing();
 
     // Eye doctor specific functions
-    int startOptimization();
-    int stopOptimization();
+    int runOptimizationAlgorithm();  // Main optimization algorithm
     int measurePSF();
     int optimizeMode(int modeIndex);
     int calculateOptimizationResult();
@@ -200,8 +203,14 @@ protected:
     // Optimization Control
     pcf::IndiProperty m_indiP_optimizationStatus;
     pcf::IndiProperty m_indiP_results;
-    pcf::IndiProperty m_indiP_startOptimization;
-    pcf::IndiProperty m_indiP_stopOptimization;
+    pcf::IndiProperty m_indiP_runOptimization;  // Single toggle switch to start/stop
+    
+    // Optimization thread
+    std::thread m_optimizationThread;
+    bool m_optimizationThreadInit{false};
+    pid_t m_optimizationThreadPID{0};
+    static void optimizationThreadStart(eyeDoctor *e);
+    void optimizationThreadExec();
 
     // Algorithm-specific INDI properties
     pcf::IndiProperty m_indiP_targetLatency;
@@ -243,8 +252,7 @@ protected:
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_ignoreFocus);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_targetLatency);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_autoOptimizeLatency);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startOptimization);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_stopOptimization);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_runOptimization);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_optimizationStatus);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_results);
     
@@ -515,6 +523,8 @@ int eyeDoctor::appStartup()
     m_indiP_availableDMs.setName("availableDMs");
     m_indiP_availableDMs.setGroup("main");
     m_indiP_availableDMs.setLabel("Available DM Devices");
+    m_indiP_availableDMs.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_availableDMs.setState(pcf::IndiProperty::Idle);
     m_indiP_availableDMs.add(pcf::IndiElement("current", m_selectedDM));
     if(registerIndiPropertyReadOnly(m_indiP_availableDMs) < 0) return -1;
 
@@ -524,6 +534,8 @@ int eyeDoctor::appStartup()
     m_indiP_selectedDM.setName("selectedDM");
     m_indiP_selectedDM.setGroup("main");
     m_indiP_selectedDM.setLabel("Selected DM Device");
+    m_indiP_selectedDM.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_selectedDM.setState(pcf::IndiProperty::Idle);
     m_indiP_selectedDM.add(pcf::IndiElement("current", m_selectedDM));
     m_indiP_selectedDM.add(pcf::IndiElement("target", m_selectedDM));
     if(registerIndiPropertyNew(m_indiP_selectedDM, &eyeDoctor::st_newCallBack_m_indiP_selectedDM) < 0) return -1;
@@ -534,6 +546,8 @@ int eyeDoctor::appStartup()
     m_indiP_selectedCamera.setName("selectedCamera");
     m_indiP_selectedCamera.setGroup("main");
     m_indiP_selectedCamera.setLabel("Selected Camera");
+    m_indiP_selectedCamera.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_selectedCamera.setState(pcf::IndiProperty::Idle);
     m_indiP_selectedCamera.add(pcf::IndiElement("current", m_selectedCamera));
     m_indiP_selectedCamera.add(pcf::IndiElement("target", m_selectedCamera));
     if(registerIndiPropertyNew(m_indiP_selectedCamera, &eyeDoctor::st_newCallBack_m_indiP_selectedCamera) < 0) return -1;
@@ -557,6 +571,27 @@ int eyeDoctor::appStartup()
 
     this->createStandardIndiNumber(m_indiP_nImages, "nImages", 1, 10, 1, "%d");
     if(registerIndiPropertyNew(m_indiP_nImages, &eyeDoctor::st_newCallBack_m_indiP_nImages) < 0) return -1;
+    
+    this->createStandardIndiNumber(m_indiP_nClusterRepeats, "nClusterRepeats", 1, 10, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_nClusterRepeats, &eyeDoctor::st_newCallBack_m_indiP_nClusterRepeats) < 0) return -1;
+    
+    this->createStandardIndiNumber(m_indiP_nSeqRepeat, "nSeqRepeat", 1, 10, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_nSeqRepeat, &eyeDoctor::st_newCallBack_m_indiP_nSeqRepeat) < 0) return -1;
+    
+    this->createStandardIndiNumber(m_indiP_cenX, "cenX", 0, 1000, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_cenX, &eyeDoctor::st_newCallBack_m_indiP_cenX) < 0) return -1;
+    
+    this->createStandardIndiNumber(m_indiP_cenY, "cenY", 0, 1000, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_cenY, &eyeDoctor::st_newCallBack_m_indiP_cenY) < 0) return -1;
+    
+    this->createStandardIndiNumber(m_indiP_skipFrames, "skipFrames", 0, 100, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_skipFrames, &eyeDoctor::st_newCallBack_m_indiP_skipFrames) < 0) return -1;
+    
+    this->createStandardIndiToggleSw(m_indiP_resetToZero, "resetToZero", "Reset To Zero Before Optimization");
+    if(registerIndiPropertyNew(m_indiP_resetToZero, &eyeDoctor::st_newCallBack_m_indiP_resetToZero) < 0) return -1;
+    
+    this->createStandardIndiToggleSw(m_indiP_ignoreFocus, "ignoreFocus", "Ignore Focus Mode");
+    if(registerIndiPropertyNew(m_indiP_ignoreFocus, &eyeDoctor::st_newCallBack_m_indiP_ignoreFocus) < 0) return -1;
 
     // Setup eyeDoctor-specific INDI properties
     m_indiP_availableCameras = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -564,6 +599,8 @@ int eyeDoctor::appStartup()
     m_indiP_availableCameras.setName("availableCameras");
     m_indiP_availableCameras.setGroup("main");
     m_indiP_availableCameras.setLabel("Available Cameras");
+    m_indiP_availableCameras.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_availableCameras.setState(pcf::IndiProperty::Idle);
     m_indiP_availableCameras.add(pcf::IndiElement("current", m_selectedCamera));
     if(registerIndiPropertyReadOnly(m_indiP_availableCameras) < 0) return -1;
 
@@ -572,6 +609,8 @@ int eyeDoctor::appStartup()
     m_indiP_results.setName("results");
     m_indiP_results.setGroup("main");
     m_indiP_results.setLabel("Results");
+    m_indiP_results.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_results.setState(pcf::IndiProperty::Idle);
     m_indiP_results.add(pcf::IndiElement("current", "No results yet"));
     if(registerIndiPropertyReadOnly(m_indiP_results) < 0) return -1;
 
@@ -580,6 +619,8 @@ int eyeDoctor::appStartup()
     m_indiP_optimizationStatus.setName("optimizationStatus");
     m_indiP_optimizationStatus.setGroup("main");
     m_indiP_optimizationStatus.setLabel("Optimization Status");
+    m_indiP_optimizationStatus.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_optimizationStatus.setState(pcf::IndiProperty::Idle);
     m_indiP_optimizationStatus.add(pcf::IndiElement("current", "Idle"));
     if(registerIndiPropertyReadOnly(m_indiP_optimizationStatus) < 0) return -1;
 
@@ -588,14 +629,20 @@ int eyeDoctor::appStartup()
     // Create algorithm-specific INDI properties
     this->createStandardIndiNumber(m_indiP_targetLatency, "targetLatency", 100, 10000, 100, "%0.0f");
     this->createStandardIndiToggleSw(m_indiP_autoOptimizeLatency, "autoOptimizeLatency", "Auto Optimize Latency");
-    this->createStandardIndiRequestSw(m_indiP_startOptimization, "startOptimization");
-    this->createStandardIndiRequestSw(m_indiP_stopOptimization, "stopOptimization");
+    this->createStandardIndiToggleSw(m_indiP_runOptimization, "runOptimization", "Run Eye Doctor Optimization");
+    m_indiP_runOptimization.setState(pcf::IndiProperty::Idle);
 
     // Register algorithm-specific INDI properties
     if(this->registerIndiPropertyNew(m_indiP_targetLatency, &eyeDoctor::st_newCallBack_m_indiP_targetLatency) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_autoOptimizeLatency, &eyeDoctor::st_newCallBack_m_indiP_autoOptimizeLatency) < 0) return -1;
-    if(this->registerIndiPropertyNew(m_indiP_startOptimization, &eyeDoctor::st_newCallBack_m_indiP_startOptimization) < 0) return -1;
-    if(this->registerIndiPropertyNew(m_indiP_stopOptimization, &eyeDoctor::st_newCallBack_m_indiP_stopOptimization) < 0) return -1;
+    if(this->registerIndiPropertyNew(m_indiP_runOptimization, &eyeDoctor::st_newCallBack_m_indiP_runOptimization) < 0) return -1;
+    
+    // Start optimization thread (waits for toggle to be turned on)
+    if(threadStart(m_optimizationThread, m_optimizationThreadInit, m_optimizationThreadPID, 
+                   pcf::IndiProperty(), 0, "", "optimization", this, optimizationThreadStart) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__, "Failed to start optimization thread"});
+    }
 
     // Setup DM Metadata INDI properties
     this->createStandardIndiNumber(m_indiP_numActuators, "numActuators", 1, 100000, 1, "%d");
@@ -612,6 +659,8 @@ int eyeDoctor::appStartup()
     m_indiP_dmType.setName("dmType");
     m_indiP_dmType.setGroup("dmMetadata");
     m_indiP_dmType.setLabel("DM Type");
+    m_indiP_dmType.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_dmType.setState(pcf::IndiProperty::Idle);
     m_indiP_dmType.add(pcf::IndiElement("current", m_dmType));
     m_indiP_dmType.add(pcf::IndiElement("target", m_dmType));
     if(registerIndiPropertyNew(m_indiP_dmType, &eyeDoctor::st_newCallBack_m_indiP_dmType) < 0) return -1;
@@ -621,6 +670,8 @@ int eyeDoctor::appStartup()
     m_indiP_deadActuators.setName("deadActuators");
     m_indiP_deadActuators.setGroup("dmMetadata");
     m_indiP_deadActuators.setLabel("Dead Actuators");
+    m_indiP_deadActuators.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_deadActuators.setState(pcf::IndiProperty::Idle);
     std::string deadActuatorsStr = "";
     for(size_t i = 0; i < m_deadActuators.size(); ++i) {
         if(i > 0) deadActuatorsStr += ",";
@@ -635,6 +686,8 @@ int eyeDoctor::appStartup()
     m_indiP_couplingMatrix.setName("couplingMatrix");
     m_indiP_couplingMatrix.setGroup("dmMetadata");
     m_indiP_couplingMatrix.setLabel("Coupling Matrix File");
+    m_indiP_couplingMatrix.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_couplingMatrix.setState(pcf::IndiProperty::Idle);
     m_indiP_couplingMatrix.add(pcf::IndiElement("current", m_couplingMatrix));
     m_indiP_couplingMatrix.add(pcf::IndiElement("target", m_couplingMatrix));
     if(registerIndiPropertyNew(m_indiP_couplingMatrix, &eyeDoctor::st_newCallBack_m_indiP_couplingMatrix) < 0) return -1;
@@ -644,6 +697,8 @@ int eyeDoctor::appStartup()
     m_indiP_actuatorGains.setName("actuatorGains");
     m_indiP_actuatorGains.setGroup("dmMetadata");
     m_indiP_actuatorGains.setLabel("Actuator Gains File");
+    m_indiP_actuatorGains.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_actuatorGains.setState(pcf::IndiProperty::Idle);
     m_indiP_actuatorGains.add(pcf::IndiElement("current", m_actuatorGains));
     m_indiP_actuatorGains.add(pcf::IndiElement("target", m_actuatorGains));
     if(registerIndiPropertyNew(m_indiP_actuatorGains, &eyeDoctor::st_newCallBack_m_indiP_actuatorGains) < 0) return -1;
@@ -653,6 +708,8 @@ int eyeDoctor::appStartup()
     m_indiP_actuatorLimits.setName("actuatorLimits");
     m_indiP_actuatorLimits.setGroup("dmMetadata");
     m_indiP_actuatorLimits.setLabel("Actuator Limits File");
+    m_indiP_actuatorLimits.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_actuatorLimits.setState(pcf::IndiProperty::Idle);
     m_indiP_actuatorLimits.add(pcf::IndiElement("current", m_actuatorLimits));
     m_indiP_actuatorLimits.add(pcf::IndiElement("target", m_actuatorLimits));
     if(registerIndiPropertyNew(m_indiP_actuatorLimits, &eyeDoctor::st_newCallBack_m_indiP_actuatorLimits) < 0) return -1;
@@ -677,6 +734,15 @@ int eyeDoctor::appLogic()
 
 int eyeDoctor::appShutdown()
 {
+    // Stop optimization if running
+    m_optimizationInProgress = false;
+    
+    // Wait for thread to finish
+    if(m_optimizationThread.joinable())
+    {
+        m_optimizationThread.join();
+    }
+    
     DMWAVEFRONTCONTROL_APP_SHUTDOWN;
     return 0;
 }
@@ -710,26 +776,110 @@ int eyeDoctor::analyzeWavefrontSensing()
 }
 
 // Eye doctor specific functions
-int eyeDoctor::startOptimization()
+void eyeDoctor::optimizationThreadStart(eyeDoctor *e)
 {
-    if(m_optimizationInProgress)
-    {
-        return 0; // Already running
-    }
-
-    m_optimizationInProgress = true;
-    m_currentModeIndex = 0;
-    m_totalModes = 1; // Placeholder - parse from m_modesToOptimize
-
-    updateOptimizationStatus();
-    return 0;
+    e->optimizationThreadExec();
 }
 
-int eyeDoctor::stopOptimization()
+void eyeDoctor::optimizationThreadExec()
 {
-    m_optimizationInProgress = false;
-    updateOptimizationStatus();
-    return 0;
+    m_optimizationThreadPID = syscall(SYS_gettid);
+    
+    // Wait for thread initialization to complete
+    while(m_optimizationThreadInit == true && shutdown() == 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    log<text_log>("Optimization thread started");
+    
+    while(shutdown() == 0)
+    {
+        // Wait for optimization to be enabled via INDI toggle
+        if(m_optimizationInProgress)
+        {
+            log<text_log>("Starting eye doctor optimization...");
+            updateOptimizationStatus();
+            
+            // Calculate total modes to optimize
+            m_currentModeIndex = 0;
+            m_totalModes = m_endModeIndex - m_startModeIndex + 1;
+            
+            // Run the optimization algorithm
+            int result = runOptimizationAlgorithm();
+            
+            // Algorithm completed - automatically turn off toggle
+            m_optimizationInProgress = false;
+            updateIfChanged(m_indiP_runOptimization, "toggle", pcf::IndiElement::Off, pcf::IndiProperty::Idle);
+            
+            if(result == 0)
+            {
+                log<text_log>("Optimization completed successfully");
+                updateIfChanged(m_indiP_optimizationStatus, "current", std::string("Completed"));
+            }
+            else
+            {
+                log<text_log>("Optimization completed with errors");
+                updateIfChanged(m_indiP_optimizationStatus, "current", std::string("Error"));
+            }
+            
+            updateOptimizationStatus();
+        }
+        
+        // Sleep for a bit before checking again
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    log<text_log>("Optimization thread exiting");
+}
+
+int eyeDoctor::runOptimizationAlgorithm()
+{
+    // Main optimization loop - runs through all modes
+    try
+    {
+        // Check if we should optimize focus first (unless ignoreFocus is set)
+        int startMode = m_startModeIndex;
+        if(!m_ignoreFocus && m_startModeIndex == 1)
+        {
+            // Mode 1 is typically focus, start there
+            startMode = 1;
+        }
+        
+        for(int modeIdx = startMode; modeIdx <= m_endModeIndex && m_optimizationInProgress; ++modeIdx)
+        {
+            m_currentModeIndex = modeIdx;
+            updateResults();
+            
+            log<text_log>("Optimizing mode " + std::to_string(modeIdx));
+            
+            // Calculate search bounds
+            std::pair<double, double> bounds = {-m_searchRange/2.0, m_searchRange/2.0};
+            
+            // Run grid sweep optimization for this mode
+            double optimalValue = gridSweepOptimization(
+                modeIdx - 1,  // Convert to 0-based index for dmWavefrontControl
+                bounds,
+                m_nSteps,
+                m_nRepeats,
+                m_nImages,
+                "coreSum",  // Metric type
+                {{"radius", m_psfCoreRadiusPixels}, {"cenX", m_cenX}, {"cenY", m_cenY}}
+            );
+            
+            log<text_log>("Mode " + std::to_string(modeIdx) + " optimized to: " + std::to_string(optimalValue));
+            
+            // Small delay between modes
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        return 0;
+    }
+    catch(const std::exception& e)
+    {
+        log<software_error>({__FILE__, __LINE__, "Optimization error: " + std::string(e.what())});
+        return -1;
+    }
 }
 
 int eyeDoctor::measurePSF()
@@ -1001,6 +1151,106 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nImages)(const pcf::IndiProperty &ipRec
     return 0;
 }
 
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nClusterRepeats)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_nClusterRepeats, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_nClusterRepeats, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_nClusterRepeats = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nSeqRepeat)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_nSeqRepeat, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_nSeqRepeat, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_nSeqRepeat = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_cenX)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_cenX, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_cenX, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_cenX = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_cenY)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_cenY, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_cenY, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_cenY = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_skipFrames)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_skipFrames, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_skipFrames, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_skipFrames = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_resetToZero)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_resetToZero, ipRecv)
+   
+    if(ipRecv.find("toggle") == ipRecv.getElements().end())
+    {
+        return log<software_error,-1>({__FILE__, __LINE__, "toggle element not found"});
+    }
+
+    m_resetToZero = (ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On);
+    updateSwitchIfChanged(m_indiP_resetToZero, "toggle", m_resetToZero ? pcf::IndiElement::On : pcf::IndiElement::Off);
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_ignoreFocus)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_ignoreFocus, ipRecv)
+   
+    if(ipRecv.find("toggle") == ipRecv.getElements().end())
+    {
+        return log<software_error,-1>({__FILE__, __LINE__, "toggle element not found"});
+    }
+
+    m_ignoreFocus = (ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On);
+    updateSwitchIfChanged(m_indiP_ignoreFocus, "toggle", m_ignoreFocus ? pcf::IndiElement::On : pcf::IndiElement::Off);
+    
+    return 0;
+}
+
 INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_searchRange)(const pcf::IndiProperty &ipRecv)
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_searchRange, ipRecv)
@@ -1051,43 +1301,44 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_optimizationStatus)(const pcf::IndiProp
     return 0;
 }
 
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_startOptimization)(const pcf::IndiProperty &ipRecv)
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_runOptimization)(const pcf::IndiProperty &ipRecv)
 {
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_startOptimization, ipRecv)
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_runOptimization, ipRecv)
    
-    if(ipRecv.find("toggle") != true)
+    std::lock_guard<std::mutex> lock(m_indiMutex);
+    
+    bool current_state = ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On;
+    bool previous_state = m_optimizationInProgress;
+    
+    if(current_state && !previous_state)
     {
-        return -1;
-    }
-
-    if(ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On)
-    {
-        if(startOptimization() < 0)
+        // Toggled ON - start optimization
+        if(m_optimizationInProgress)
         {
-            return log<software_error,-1>({__FILE__, __LINE__});
+            log<text_log>("Optimization already in progress");
+            return 0;
         }
-    }
-
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_stopOptimization)(const pcf::IndiProperty &ipRecv)
-{
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_stopOptimization, ipRecv)
-   
-    if(ipRecv.find("toggle") != true)
-    {
-        return -1;
-    }
-
-    if(ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On)
-    {
-        if(stopOptimization() < 0)
+        
+        // Validate parameters before starting
+        if(m_startModeIndex < 1 || m_endModeIndex < m_startModeIndex)
         {
-            return log<software_error,-1>({__FILE__, __LINE__});
+            log<software_error>({__FILE__, __LINE__, "Invalid mode range: " + std::to_string(m_startModeIndex) + " to " + std::to_string(m_endModeIndex)});
+            updateIfChanged(m_indiP_runOptimization, "toggle", pcf::IndiElement::Off, pcf::IndiProperty::Alert);
+            return -1;
         }
+        
+        m_optimizationInProgress = true;
+        updateIfChanged(m_indiP_runOptimization, "toggle", pcf::IndiElement::On, pcf::IndiProperty::Busy);
+        log<text_log>("Optimization started: modes " + std::to_string(m_startModeIndex) + " to " + std::to_string(m_endModeIndex));
     }
-
+    else if(!current_state && previous_state)
+    {
+        // Toggled OFF - stop optimization
+        m_optimizationInProgress = false;
+        updateIfChanged(m_indiP_runOptimization, "toggle", pcf::IndiElement::Off, pcf::IndiProperty::Idle);
+        log<text_log>("Optimization stopped by user");
+    }
+    
     return 0;
 }
 
