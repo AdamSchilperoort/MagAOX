@@ -719,7 +719,19 @@ dmWavefrontControl<derivedT>::dmWavefrontControl()
 template<class derivedT>
 dmWavefrontControl<derivedT>::~dmWavefrontControl()
 {
-    // Cleanup if needed
+    // Explicitly clear containers to ensure proper destruction order
+    try {
+        m_modeSets.clear();
+        m_modeSetMap.clear();
+        m_dmInfo.actuators.clear();
+        m_configDeadActuators.clear();
+        m_modesToOptimize.clear();
+        m_modeSetFiles.clear();
+        m_modeSetNames.clear();
+        m_mlatBuffer.clear();
+    } catch(...) {
+        // Ignore exceptions in destructor
+    }
 }
 
 // Implementation of enhanced DM control methods

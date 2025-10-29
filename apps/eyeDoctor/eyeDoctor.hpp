@@ -129,26 +129,13 @@ public:
     /// D'tor, declared and defined for noexcept.
     ~eyeDoctor() noexcept
     {
-        // Ensure thread is cleaned up if appShutdown wasn't called
-        m_optimizationInProgress = false;
-        m_optimizationThreadInit = false;
-        
+        // Try to cleanup, but don't do anything that could throw or access invalid memory
         if(m_optimizationThread.joinable())
         {
-            try
-            {
-                // Don't wait long in destructor - thread should exit quickly
-                // The shutdown flag should already be set by base class
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                if(m_optimizationThread.joinable())
-                {
-                    m_optimizationThread.join();
-                }
-            }
-            catch(...)
-            {
-                // Ignore exceptions in destructor
-            }
+            m_optimizationInProgress = false;
+            m_optimizationThreadInit = false;
+            // Don't try to join in destructor - let std::thread destructor handle it
+            // Joining here can cause issues if base classes are already destroyed
         }
     }
 
