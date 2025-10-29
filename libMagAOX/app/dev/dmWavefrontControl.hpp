@@ -188,9 +188,18 @@ protected:
     std::vector<std::string> m_modesToOptimize; ///< Specific modes to optimize (format: "modeset:mode")
     
     // Configuration files
-    std::string m_dmMetadataFile;           ///< DM metadata configuration file
+    std::string m_dmMetadataFile;           ///< DM metadata configuration file (optional, if empty use config params)
     std::vector<std::string> m_modeSetFiles; ///< List of modeset FITS files
     std::vector<std::string> m_modeSetNames; ///< Names for each modeset
+    
+    // DM metadata parameters (loaded from config if metadata_file is empty)
+    int m_configNumActuators;               ///< Number of actuators from config
+    int m_configGridWidth;                  ///< Grid width from config
+    int m_configGridHeight;                 ///< Grid height from config
+    double m_configActuatorSpacing;        ///< Actuator spacing from config (mm)
+    double m_configMaxStroke;               ///< Max stroke from config (microns)
+    std::string m_configDmType;            ///< DM type from config
+    std::vector<int> m_configDeadActuators; ///< Dead actuators from config
     
     // Timing buffers for MLAT
     std::vector<double> m_mlatBuffer;       ///< Circular buffer for MLAT measurements
@@ -686,6 +695,15 @@ dmWavefrontControl<derivedT>::dmWavefrontControl()
     m_dmInfo.actuatorSpacing = 0.0;
     m_dmInfo.maxStroke = 0.0;
     
+    // Initialize config parameters
+    m_configNumActuators = 0;
+    m_configGridWidth = 0;
+    m_configGridHeight = 0;
+    m_configActuatorSpacing = 0.0;
+    m_configMaxStroke = 0.0;
+    m_configDmType = "";
+    m_configDeadActuators.clear();
+    
     // Initialize timing buffers
     m_mlatBuffer.reserve(m_timingBufferSize);
 }
@@ -731,6 +749,26 @@ int dmWavefrontControl<derivedT>::loadDMMetadata()
                     }
                 }
             }
+        } else {
+            // Use config parameters instead of file
+            if (m_configNumActuators > 0) {
+                m_dmInfo.numActuators = m_configNumActuators;
+            }
+            if (m_configGridWidth > 0) {
+                m_dmInfo.width = m_configGridWidth;
+            }
+            if (m_configGridHeight > 0) {
+                m_dmInfo.height = m_configGridHeight;
+            }
+            if (m_configActuatorSpacing > 0) {
+                m_dmInfo.actuatorSpacing = m_configActuatorSpacing;
+            }
+            if (m_configMaxStroke > 0) {
+                m_dmInfo.maxStroke = m_configMaxStroke;
+            }
+            if (!m_configDmType.empty()) {
+                m_dmInfo.name = m_configDmType;
+            }
         }
         
         // Initialize default values if not loaded
@@ -759,6 +797,16 @@ int dmWavefrontControl<derivedT>::loadDMMetadata()
             m_dmInfo.actuators[i].maxValue = m_dmInfo.maxStroke;
             m_dmInfo.actuators[i].isDead = false;
             m_dmInfo.actuators[i].couplingFactor = 0.0;
+        }
+        
+        // Mark dead actuators (from config or file)
+        if (!m_configDeadActuators.empty()) {
+            for (int deadId : m_configDeadActuators) {
+                if (deadId >= 0 && deadId < m_dmInfo.numActuators) {
+                    m_dmInfo.actuators[deadId].isDead = true;
+                    m_dmInfo.actuatorMask(deadId / m_dmInfo.width, deadId % m_dmInfo.width) = false;
+                }
+            }
         }
         
         derived().template log<text_log>("Loaded DM metadata: " + std::to_string(m_dmInfo.numActuators) + " actuators");
@@ -1270,6 +1318,23 @@ void dmWavefrontControl<derivedT>::setupConfig(mx::app::appConfigurator &config)
     config.add("dmWavefrontControl.max_stroke", "", "dmWavefrontControl.max_stroke", 
                argType::Required, "dmWavefrontControl", "max_stroke", false, "float", 
                "Maximum stroke in microns");
+    
+    // DM metadata parameters (used when metadata_file is empty)
+    config.add("dmWavefrontControl.numActuators", "", "dmWavefrontControl.numActuators", 
+               argType::Required, "dmWavefrontControl", "numActuators", false, "int", 
+               "Number of actuators in the DM");
+    config.add("dmWavefrontControl.gridWidth", "", "dmWavefrontControl.gridWidth", 
+               argType::Required, "dmWavefrontControl", "gridWidth", false, "int", 
+               "Actuator grid width");
+    config.add("dmWavefrontControl.gridHeight", "", "dmWavefrontControl.gridHeight", 
+               argType::Required, "dmWavefrontControl", "gridHeight", false, "int", 
+               "Actuator grid height");
+    config.add("dmWavefrontControl.dmType", "", "dmWavefrontControl.dmType", 
+               argType::Required, "dmWavefrontControl", "dmType", false, "string", 
+               "DM type/manufacturer");
+    config.add("dmWavefrontControl.deadActuators", "", "dmWavefrontControl.deadActuators", 
+               argType::Required, "dmWavefrontControl", "deadActuators", false, "vector<int>", 
+               "List of dead actuator indices (comma-separated)");
 }
 
 template<class derivedT>
@@ -1293,6 +1358,15 @@ void dmWavefrontControl<derivedT>::loadConfig(mx::app::appConfigurator &config)
     
     // Load DM metadata configuration
     config(m_dmMetadataFile, "dmWavefrontControl.metadata_file");
+    
+    // Load DM metadata parameters (used if metadata_file is empty)
+    config(m_configNumActuators, "dmWavefrontControl.numActuators");
+    config(m_configGridWidth, "dmWavefrontControl.gridWidth");
+    config(m_configGridHeight, "dmWavefrontControl.gridHeight");
+    config(m_configActuatorSpacing, "dmWavefrontControl.actuator_spacing");
+    config(m_configMaxStroke, "dmWavefrontControl.max_stroke");
+    config(m_configDmType, "dmWavefrontControl.dmType");
+    config(m_configDeadActuators, "dmWavefrontControl.deadActuators");
 }
 
 template<class derivedT>
