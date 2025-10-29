@@ -638,8 +638,10 @@ int eyeDoctor::appStartup()
     if(this->registerIndiPropertyNew(m_indiP_runOptimization, &eyeDoctor::st_newCallBack_m_indiP_runOptimization) < 0) return -1;
     
     // Start optimization thread (waits for toggle to be turned on)
+    // Use a dummy INDI property for thread monitoring (not exposed to INDI)
+    pcf::IndiProperty dummyThreadProp;
     if(threadStart(m_optimizationThread, m_optimizationThreadInit, m_optimizationThreadPID, 
-                   pcf::IndiProperty(), 0, "", "optimization", this, optimizationThreadStart) < 0)
+                   dummyThreadProp, 0, "", "optimization", this, optimizationThreadStart) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__, "Failed to start optimization thread"});
     }
@@ -1225,7 +1227,7 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_resetToZero)(const pcf::IndiProperty &i
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_resetToZero, ipRecv)
    
-    if(ipRecv.find("toggle") == ipRecv.getElements().end())
+    if(ipRecv.find("toggle") == 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__, "toggle element not found"});
     }
@@ -1240,7 +1242,7 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_ignoreFocus)(const pcf::IndiProperty &i
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_ignoreFocus, ipRecv)
    
-    if(ipRecv.find("toggle") == ipRecv.getElements().end())
+    if(ipRecv.find("toggle") == 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__, "toggle element not found"});
     }
