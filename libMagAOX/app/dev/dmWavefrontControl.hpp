@@ -719,9 +719,35 @@ dmWavefrontControl<derivedT>::dmWavefrontControl()
 template<class derivedT>
 dmWavefrontControl<derivedT>::~dmWavefrontControl()
 {
-    // Don't explicitly clear - let destructors handle it naturally
-    // Explicit clearing can cause double-free issues with Eigen types
-    // The std::vector and std::map destructors will handle cleanup
+    // Clear containers in reverse order of construction to avoid issues
+    // Clear map first, then vector (which contains eigenCube objects)
+    // Doing this explicitly helps ensure proper destruction order
+    try {
+        // Clear the map first (no complex types)
+        m_modeSetMap.clear();
+        
+        // Clear vectors that don't contain eigenCube
+        m_dmInfo.actuators.clear();
+        m_configDeadActuators.clear();
+        m_modesToOptimize.clear();
+        m_modeSetFiles.clear();
+        m_modeSetNames.clear();
+        m_mlatBuffer.clear();
+        
+        // Clear eigenImage types in DMInfo before clearing modesets
+        m_dmInfo.actuatorMask.resize(0, 0);
+        m_dmInfo.actuatorGains.resize(0, 0);
+        
+        // Finally clear modesets (contains eigenCube)
+        // Reset each modeset's eigenCube to empty before clearing the vector
+        for(auto& modeset : m_modeSets) {
+            // Resize eigenCube to empty to release memory safely
+            modeset.modes.resize(0, 0, 0);
+        }
+        m_modeSets.clear();
+    } catch(...) {
+        // Ignore exceptions in destructor
+    }
 }
 
 // Implementation of enhanced DM control methods
@@ -1011,8 +1037,9 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     modeset.name = name;
                     modeset.filename = filename;
                     
-                    // Add to modesets list using move semantics to avoid copying eigenCube
-                    m_modeSets.push_back(std::move(modeset));
+                    // Copy instead of move to avoid issues with eigenCube destructor
+                    // (eigenCube may not have proper move semantics)
+                    m_modeSets.push_back(modeset);
                     size_t modesetIndex = m_modeSets.size() - 1;
                     m_modeSetMap[name] = modesetIndex;
                     
@@ -1052,8 +1079,8 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     modeset.name = name;
                     modeset.filename = filename;
                     
-                    // Add to modesets list using move semantics to avoid copying eigenCube
-                    m_modeSets.push_back(std::move(modeset));
+                    // Copy instead of move to avoid issues with eigenCube destructor
+                    m_modeSets.push_back(modeset);
                     m_modeSetMap[name] = m_modeSets.size() - 1;
                     
                     derived().template log<text_log>("Loaded modeset '" + name + "' with 1 mode from 2D FITS file: " + filename);
@@ -1104,8 +1131,8 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
         modeset.name = name;
         modeset.filename = filename;
         
-        // Add to modesets list using move semantics to avoid copying eigenCube
-        m_modeSets.push_back(std::move(modeset));
+        // Copy instead of move to avoid issues with eigenCube destructor
+        m_modeSets.push_back(modeset);
         m_modeSetMap[name] = m_modeSets.size() - 1;
         
         derived().template log<text_log>("Loaded modeset '" + name + "' with " + std::to_string(numModes) + " modes from " + filename);
