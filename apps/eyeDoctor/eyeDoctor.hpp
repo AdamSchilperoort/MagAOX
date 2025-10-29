@@ -10,6 +10,7 @@
 #include <mx/improc/eigenImage.hpp>
 #include <mx/improc/milkImage.hpp>
 #include <mx/improc/eigenCube.hpp>
+#include <sstream>
 using namespace mx::improc;
 
 #include "../../libMagAOX/libMagAOX.hpp" //Note this is included on command line to trigger pch
@@ -92,6 +93,16 @@ protected:
     int m_maxIterations;                 ///< Maximum number of optimization iterations
     double m_convergenceThreshold;       ///< Convergence threshold for optimization
     bool m_adaptiveStepSize;             ///< Whether to use adaptive step sizes
+    
+    // DM Metadata Parameters
+    int m_numActuators;                  ///< Number of actuators in the DM
+    int m_gridWidth;                     ///< Actuator grid width
+    int m_gridHeight;                    ///< Actuator grid height
+    std::string m_dmType;                ///< DM type/manufacturer
+    std::vector<int> m_deadActuators;    ///< List of dead actuator indices
+    std::string m_couplingMatrix;        ///< Path to coupling matrix file (optional)
+    std::string m_actuatorGains;         ///< Path to actuator gains file (optional)
+    std::string m_actuatorLimits;        ///< Path to actuator limits file (optional)
     
     ///@}
 
@@ -196,6 +207,16 @@ protected:
     pcf::IndiProperty m_indiP_targetLatency;
     pcf::IndiProperty m_indiP_autoOptimizeLatency;
 
+    // DM Metadata INDI properties
+    pcf::IndiProperty m_indiP_numActuators;
+    pcf::IndiProperty m_indiP_gridWidth;
+    pcf::IndiProperty m_indiP_gridHeight;
+    pcf::IndiProperty m_indiP_dmType;
+    pcf::IndiProperty m_indiP_deadActuators;
+    pcf::IndiProperty m_indiP_couplingMatrix;
+    pcf::IndiProperty m_indiP_actuatorGains;
+    pcf::IndiProperty m_indiP_actuatorLimits;
+
     // Callback declarations for dmWavefrontControl properties
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeAmplitude);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
@@ -226,6 +247,16 @@ protected:
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_stopOptimization);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_optimizationStatus);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_results);
+    
+    // Callback declarations for DM metadata properties
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_numActuators);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_gridWidth);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_gridHeight);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmType);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_deadActuators);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_couplingMatrix);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_actuatorGains);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_actuatorLimits);
 
 
     ///@}
@@ -298,6 +329,16 @@ eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
     m_convergenceThreshold = 1e-6;
     m_adaptiveStepSize = true;
     
+    // Initialize DM metadata parameters
+    m_numActuators = 4096;
+    m_gridWidth = 64;
+    m_gridHeight = 64;
+    m_dmType = "Boston Micromachines";
+    m_deadActuators.clear();
+    m_couplingMatrix = "";
+    m_actuatorGains = "";
+    m_actuatorLimits = "";
+    
     // Initialize state management
     m_optimizationInProgress = false;
     m_measurementComplete = false;
@@ -355,6 +396,16 @@ void eyeDoctor::setupConfig()
     config.add("eyedoctor.maxIterations", "", "eyedoctor.maxIterations", argType::Required, "eyedoctor", "maxIterations", false, "int", "Maximum number of optimization iterations");
     config.add("eyedoctor.convergenceThreshold", "", "eyedoctor.convergenceThreshold", argType::Required, "eyedoctor", "convergenceThreshold", false, "float", "Convergence threshold for optimization");
     config.add("eyedoctor.adaptiveStepSize", "", "eyedoctor.adaptiveStepSize", argType::Required, "eyedoctor", "adaptiveStepSize", false, "bool", "Whether to use adaptive step sizes");
+    
+    // DM Metadata Parameters
+    config.add("eyedoctor.numActuators", "", "eyedoctor.numActuators", argType::Required, "eyedoctor", "numActuators", false, "int", "Number of actuators in the DM");
+    config.add("eyedoctor.gridWidth", "", "eyedoctor.gridWidth", argType::Required, "eyedoctor", "gridWidth", false, "int", "Actuator grid width");
+    config.add("eyedoctor.gridHeight", "", "eyedoctor.gridHeight", argType::Required, "eyedoctor", "gridHeight", false, "int", "Actuator grid height");
+    config.add("eyedoctor.dmType", "", "eyedoctor.dmType", argType::Required, "eyedoctor", "dmType", false, "string", "DM type/manufacturer");
+    config.add("eyedoctor.deadActuators", "", "eyedoctor.deadActuators", argType::Required, "eyedoctor", "deadActuators", false, "vector<int>", "List of dead actuator indices (comma-separated)");
+    config.add("eyedoctor.couplingMatrix", "", "eyedoctor.couplingMatrix", argType::Required, "eyedoctor", "couplingMatrix", false, "string", "Path to coupling matrix file (optional)");
+    config.add("eyedoctor.actuatorGains", "", "eyedoctor.actuatorGains", argType::Required, "eyedoctor", "actuatorGains", false, "string", "Path to actuator gains file (optional)");
+    config.add("eyedoctor.actuatorLimits", "", "eyedoctor.actuatorLimits", argType::Required, "eyedoctor", "actuatorLimits", false, "string", "Path to actuator limits file (optional)");
 }
 
 int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
@@ -394,6 +445,16 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     _config(m_maxIterations, "eyedoctor.maxIterations");
     _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
     _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
+    
+    // DM Metadata Parameters
+    _config(m_numActuators, "eyedoctor.numActuators");
+    _config(m_gridWidth, "eyedoctor.gridWidth");
+    _config(m_gridHeight, "eyedoctor.gridHeight");
+    _config(m_dmType, "eyedoctor.dmType");
+    _config(m_deadActuators, "eyedoctor.deadActuators");
+    _config(m_couplingMatrix, "eyedoctor.couplingMatrix");
+    _config(m_actuatorGains, "eyedoctor.actuatorGains");
+    _config(m_actuatorLimits, "eyedoctor.actuatorLimits");
 
     // Map DM device selection to actual device names and shared memory
     if(m_selectedDM == "wooferModes") {
@@ -524,6 +585,66 @@ int eyeDoctor::appStartup()
     if(this->registerIndiPropertyNew(m_indiP_autoOptimizeLatency, &eyeDoctor::st_newCallBack_m_indiP_autoOptimizeLatency) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_startOptimization, &eyeDoctor::st_newCallBack_m_indiP_startOptimization) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_stopOptimization, &eyeDoctor::st_newCallBack_m_indiP_stopOptimization) < 0) return -1;
+
+    // Setup DM Metadata INDI properties
+    this->createStandardIndiNumber(m_indiP_numActuators, "numActuators", 1, 100000, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_numActuators, &eyeDoctor::st_newCallBack_m_indiP_numActuators) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_gridWidth, "gridWidth", 1, 1000, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_gridWidth, &eyeDoctor::st_newCallBack_m_indiP_gridWidth) < 0) return -1;
+
+    this->createStandardIndiNumber(m_indiP_gridHeight, "gridHeight", 1, 1000, 1, "%d");
+    if(registerIndiPropertyNew(m_indiP_gridHeight, &eyeDoctor::st_newCallBack_m_indiP_gridHeight) < 0) return -1;
+
+    m_indiP_dmType = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_dmType.setDevice(this->configName());
+    m_indiP_dmType.setName("dmType");
+    m_indiP_dmType.setGroup("dmMetadata");
+    m_indiP_dmType.setLabel("DM Type");
+    m_indiP_dmType.add(pcf::IndiElement("current", m_dmType));
+    m_indiP_dmType.add(pcf::IndiElement("target", m_dmType));
+    if(registerIndiPropertyNew(m_indiP_dmType, &eyeDoctor::st_newCallBack_m_indiP_dmType) < 0) return -1;
+
+    m_indiP_deadActuators = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_deadActuators.setDevice(this->configName());
+    m_indiP_deadActuators.setName("deadActuators");
+    m_indiP_deadActuators.setGroup("dmMetadata");
+    m_indiP_deadActuators.setLabel("Dead Actuators");
+    std::string deadActuatorsStr = "";
+    for(size_t i = 0; i < m_deadActuators.size(); ++i) {
+        if(i > 0) deadActuatorsStr += ",";
+        deadActuatorsStr += std::to_string(m_deadActuators[i]);
+    }
+    m_indiP_deadActuators.add(pcf::IndiElement("current", deadActuatorsStr));
+    m_indiP_deadActuators.add(pcf::IndiElement("target", deadActuatorsStr));
+    if(registerIndiPropertyNew(m_indiP_deadActuators, &eyeDoctor::st_newCallBack_m_indiP_deadActuators) < 0) return -1;
+
+    m_indiP_couplingMatrix = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_couplingMatrix.setDevice(this->configName());
+    m_indiP_couplingMatrix.setName("couplingMatrix");
+    m_indiP_couplingMatrix.setGroup("dmMetadata");
+    m_indiP_couplingMatrix.setLabel("Coupling Matrix File");
+    m_indiP_couplingMatrix.add(pcf::IndiElement("current", m_couplingMatrix));
+    m_indiP_couplingMatrix.add(pcf::IndiElement("target", m_couplingMatrix));
+    if(registerIndiPropertyNew(m_indiP_couplingMatrix, &eyeDoctor::st_newCallBack_m_indiP_couplingMatrix) < 0) return -1;
+
+    m_indiP_actuatorGains = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_actuatorGains.setDevice(this->configName());
+    m_indiP_actuatorGains.setName("actuatorGains");
+    m_indiP_actuatorGains.setGroup("dmMetadata");
+    m_indiP_actuatorGains.setLabel("Actuator Gains File");
+    m_indiP_actuatorGains.add(pcf::IndiElement("current", m_actuatorGains));
+    m_indiP_actuatorGains.add(pcf::IndiElement("target", m_actuatorGains));
+    if(registerIndiPropertyNew(m_indiP_actuatorGains, &eyeDoctor::st_newCallBack_m_indiP_actuatorGains) < 0) return -1;
+
+    m_indiP_actuatorLimits = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_actuatorLimits.setDevice(this->configName());
+    m_indiP_actuatorLimits.setName("actuatorLimits");
+    m_indiP_actuatorLimits.setGroup("dmMetadata");
+    m_indiP_actuatorLimits.setLabel("Actuator Limits File");
+    m_indiP_actuatorLimits.add(pcf::IndiElement("current", m_actuatorLimits));
+    m_indiP_actuatorLimits.add(pcf::IndiElement("target", m_actuatorLimits));
+    if(registerIndiPropertyNew(m_indiP_actuatorLimits, &eyeDoctor::st_newCallBack_m_indiP_actuatorLimits) < 0) return -1;
 
     // Configure dmWavefrontControl base class with current settings
     updateDMConfiguration();
@@ -956,6 +1077,134 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_stopOptimization)(const pcf::IndiProper
         }
     }
 
+    return 0;
+}
+
+// DM Metadata callbacks
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_numActuators)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_numActuators, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_numActuators, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_numActuators = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_gridWidth)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_gridWidth, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_gridWidth, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_gridWidth = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_gridHeight)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_gridHeight, ipRecv)
+   
+    int target;
+    if(indiTargetUpdate(m_indiP_gridHeight, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_gridHeight = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmType)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmType, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_dmType, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_dmType = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_deadActuators)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_deadActuators, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_deadActuators, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    // Parse comma-separated list of actuator indices
+    m_deadActuators.clear();
+    if(!target.empty()) {
+        std::istringstream iss(target);
+        std::string token;
+        while(std::getline(iss, token, ',')) {
+            if(!token.empty()) {
+                try {
+                    m_deadActuators.push_back(std::stoi(token));
+                } catch(...) {
+                    // Skip invalid entries
+                }
+            }
+        }
+    }
+    
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_couplingMatrix)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_couplingMatrix, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_couplingMatrix, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_couplingMatrix = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_actuatorGains)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_actuatorGains, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_actuatorGains, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_actuatorGains = target;
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_actuatorLimits)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_actuatorLimits, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_actuatorLimits, target, ipRecv, false) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_actuatorLimits = target;
     return 0;
 }
 
