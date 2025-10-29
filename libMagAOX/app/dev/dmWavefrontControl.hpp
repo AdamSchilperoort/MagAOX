@@ -719,19 +719,9 @@ dmWavefrontControl<derivedT>::dmWavefrontControl()
 template<class derivedT>
 dmWavefrontControl<derivedT>::~dmWavefrontControl()
 {
-    // Explicitly clear containers to ensure proper destruction order
-    try {
-        m_modeSets.clear();
-        m_modeSetMap.clear();
-        m_dmInfo.actuators.clear();
-        m_configDeadActuators.clear();
-        m_modesToOptimize.clear();
-        m_modeSetFiles.clear();
-        m_modeSetNames.clear();
-        m_mlatBuffer.clear();
-    } catch(...) {
-        // Ignore exceptions in destructor
-    }
+    // Don't explicitly clear - let destructors handle it naturally
+    // Explicit clearing can cause double-free issues with Eigen types
+    // The std::vector and std::map destructors will handle cleanup
 }
 
 // Implementation of enhanced DM control methods
@@ -1021,8 +1011,8 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     modeset.name = name;
                     modeset.filename = filename;
                     
-                    // Add to modesets list
-                    m_modeSets.push_back(modeset);
+                    // Add to modesets list using move semantics to avoid copying eigenCube
+                    m_modeSets.push_back(std::move(modeset));
                     size_t modesetIndex = m_modeSets.size() - 1;
                     m_modeSetMap[name] = modesetIndex;
                     
@@ -1058,8 +1048,12 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
                     
                     fits_close_file(fptr, &status);
                     
-                    // Add to modesets list
-                    m_modeSets.push_back(modeset);
+                    // Ensure name is set correctly
+                    modeset.name = name;
+                    modeset.filename = filename;
+                    
+                    // Add to modesets list using move semantics to avoid copying eigenCube
+                    m_modeSets.push_back(std::move(modeset));
                     m_modeSetMap[name] = m_modeSets.size() - 1;
                     
                     derived().template log<text_log>("Loaded modeset '" + name + "' with 1 mode from 2D FITS file: " + filename);
@@ -1072,7 +1066,8 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
         // Fallback: create a simple modeset if FITS loading fails
         derived().template log<text_log>("FITS loading failed, creating default modeset for: " + name);
         int width = 32, height = 32, numModes = 10;
-        modeset.modes.resize(numModes, height, width);
+        // eigenCube::resize takes (rows, cols, planes), not (planes, rows, cols)
+        modeset.modes.resize(height, width, numModes);
         
         // Initialize with zeros
         for (int p = 0; p < modeset.modes.planes(); ++p) {
@@ -1105,7 +1100,12 @@ int dmWavefrontControl<derivedT>::loadModeSet(const std::string& filename, const
         modeset.modeMax.resize(numModes, 10.0);   // Default +10 microns
         
         // Add to modesets list
-        m_modeSets.push_back(modeset);
+        // Ensure name is set correctly
+        modeset.name = name;
+        modeset.filename = filename;
+        
+        // Add to modesets list using move semantics to avoid copying eigenCube
+        m_modeSets.push_back(std::move(modeset));
         m_modeSetMap[name] = m_modeSets.size() - 1;
         
         derived().template log<text_log>("Loaded modeset '" + name + "' with " + std::to_string(numModes) + " modes from " + filename);
