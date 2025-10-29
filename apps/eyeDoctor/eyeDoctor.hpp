@@ -397,15 +397,16 @@ void eyeDoctor::setupConfig()
     config.add("eyedoctor.convergenceThreshold", "", "eyedoctor.convergenceThreshold", argType::Required, "eyedoctor", "convergenceThreshold", false, "float", "Convergence threshold for optimization");
     config.add("eyedoctor.adaptiveStepSize", "", "eyedoctor.adaptiveStepSize", argType::Required, "eyedoctor", "adaptiveStepSize", false, "bool", "Whether to use adaptive step sizes");
     
-    // DM Metadata Parameters
-    config.add("eyedoctor.numActuators", "", "eyedoctor.numActuators", argType::Required, "eyedoctor", "numActuators", false, "int", "Number of actuators in the DM");
-    config.add("eyedoctor.gridWidth", "", "eyedoctor.gridWidth", argType::Required, "eyedoctor", "gridWidth", false, "int", "Actuator grid width");
-    config.add("eyedoctor.gridHeight", "", "eyedoctor.gridHeight", argType::Required, "eyedoctor", "gridHeight", false, "int", "Actuator grid height");
-    config.add("eyedoctor.dmType", "", "eyedoctor.dmType", argType::Required, "eyedoctor", "dmType", false, "string", "DM type/manufacturer");
-    config.add("eyedoctor.deadActuators", "", "eyedoctor.deadActuators", argType::Required, "eyedoctor", "deadActuators", false, "vector<int>", "List of dead actuator indices (comma-separated)");
-    config.add("eyedoctor.couplingMatrix", "", "eyedoctor.couplingMatrix", argType::Required, "eyedoctor", "couplingMatrix", false, "string", "Path to coupling matrix file (optional)");
-    config.add("eyedoctor.actuatorGains", "", "eyedoctor.actuatorGains", argType::Required, "eyedoctor", "actuatorGains", false, "string", "Path to actuator gains file (optional)");
-    config.add("eyedoctor.actuatorLimits", "", "eyedoctor.actuatorLimits", argType::Required, "eyedoctor", "actuatorLimits", false, "string", "Path to actuator limits file (optional)");
+    // DM Metadata Parameters - read from dmWavefrontControl section for INDI display/update
+    // These are kept as member variables for INDI interface, but loaded from base class config
+    config.add("eyedoctor.numActuators", "", "eyedoctor.numActuators", argType::Optional, "eyedoctor", "numActuators", false, "int", "Number of actuators in the DM (reads from dmWavefrontControl if not set)");
+    config.add("eyedoctor.gridWidth", "", "eyedoctor.gridWidth", argType::Optional, "eyedoctor", "gridWidth", false, "int", "Actuator grid width (reads from dmWavefrontControl if not set)");
+    config.add("eyedoctor.gridHeight", "", "eyedoctor.gridHeight", argType::Optional, "eyedoctor", "gridHeight", false, "int", "Actuator grid height (reads from dmWavefrontControl if not set)");
+    config.add("eyedoctor.dmType", "", "eyedoctor.dmType", argType::Optional, "eyedoctor", "dmType", false, "string", "DM type/manufacturer (reads from dmWavefrontControl if not set)");
+    config.add("eyedoctor.deadActuators", "", "eyedoctor.deadActuators", argType::Optional, "eyedoctor", "deadActuators", false, "vector<int>", "List of dead actuator indices (reads from dmWavefrontControl if not set)");
+    config.add("eyedoctor.couplingMatrix", "", "eyedoctor.couplingMatrix", argType::Optional, "eyedoctor", "couplingMatrix", false, "string", "Path to coupling matrix file (optional)");
+    config.add("eyedoctor.actuatorGains", "", "eyedoctor.actuatorGains", argType::Optional, "eyedoctor", "actuatorGains", false, "string", "Path to actuator gains file (optional)");
+    config.add("eyedoctor.actuatorLimits", "", "eyedoctor.actuatorLimits", argType::Optional, "eyedoctor", "actuatorLimits", false, "string", "Path to actuator limits file (optional)");
 }
 
 int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
@@ -446,12 +447,22 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
     _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
     
-    // DM Metadata Parameters
+    // DM Metadata Parameters - read from eyedoctor section first, fall back to dmWavefrontControl section
     _config(m_numActuators, "eyedoctor.numActuators");
+    if(m_numActuators == 0) _config(m_numActuators, "dmWavefrontControl.numActuators");
+    
     _config(m_gridWidth, "eyedoctor.gridWidth");
+    if(m_gridWidth == 0) _config(m_gridWidth, "dmWavefrontControl.gridWidth");
+    
     _config(m_gridHeight, "eyedoctor.gridHeight");
+    if(m_gridHeight == 0) _config(m_gridHeight, "dmWavefrontControl.gridHeight");
+    
     _config(m_dmType, "eyedoctor.dmType");
+    if(m_dmType.empty()) _config(m_dmType, "dmWavefrontControl.dmType");
+    
     _config(m_deadActuators, "eyedoctor.deadActuators");
+    if(m_deadActuators.empty()) _config(m_deadActuators, "dmWavefrontControl.deadActuators");
+    
     _config(m_couplingMatrix, "eyedoctor.couplingMatrix");
     _config(m_actuatorGains, "eyedoctor.actuatorGains");
     _config(m_actuatorLimits, "eyedoctor.actuatorLimits");
