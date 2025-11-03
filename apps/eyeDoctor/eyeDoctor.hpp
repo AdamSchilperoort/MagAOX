@@ -78,7 +78,7 @@ protected:
     
     // Algorithm Parameters (from console_comprehensive)
     double m_psfCoreRadiusPixels;        ///< Radius of the PSF core to measure
-    double m_searchRange;                ///< Range of values in microns for grid search
+    // Note: m_searchRange is inherited from dmWavefrontControl base class
     int m_nSteps;                        ///< Number of points to sample in grid search
     int m_nRepeats;                      ///< Number of sweeps
     int m_nClusterRepeats;               ///< Number of times to repeat a cluster of modes
@@ -248,7 +248,7 @@ protected:
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startModeIndex);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_endModeIndex);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadiusPixels);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_searchRange);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_searchRange);  // Base class registers, derived implements
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nSteps);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nRepeats);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_nClusterRepeats);
@@ -444,7 +444,7 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     
     // Algorithm Parameters
     _config(m_psfCoreRadiusPixels, "eyedoctor.psfCoreRadiusPixels");
-    _config(m_searchRange, "eyedoctor.searchRange");
+    // Note: m_searchRange is loaded by dmWavefrontControl base class from dmWavefrontControl.searchRange
     _config(m_nSteps, "eyedoctor.nSteps");
     _config(m_nRepeats, "eyedoctor.nRepeats");
     _config(m_nClusterRepeats, "eyedoctor.nClusterRepeats");
@@ -524,7 +524,15 @@ void eyeDoctor::loadConfig()
 
 int eyeDoctor::appStartup()
 {
-    DMWAVEFRONTCONTROL_APP_STARTUP;
+    log<text_log>("eyeDoctor::appStartup() - Starting base class initialization");
+    
+    if(dmWavefrontControlT::appStartup() < 0)
+    {
+        log<software_error>({__FILE__, __LINE__, "dmWavefrontControl::appStartup() failed"});
+        return -1;
+    }
+    
+    log<text_log>("eyeDoctor::appStartup() - Base class initialization complete, registering eyeDoctor properties");
 
     // Setup Available DMs INDI Property (Read-only)
     m_indiP_availableDMs = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -548,6 +556,7 @@ int eyeDoctor::appStartup()
     m_indiP_selectedDM.add(pcf::IndiElement("current", m_selectedDM));
     m_indiP_selectedDM.add(pcf::IndiElement("target", m_selectedDM));
     if(registerIndiPropertyNew(m_indiP_selectedDM, &eyeDoctor::st_newCallBack_m_indiP_selectedDM) < 0) return -1;
+    log<text_log>("eyeDoctor::appStartup() - Registered DM selection properties");
 
     // Setup Camera Selection INDI Property
     m_indiP_selectedCamera = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -560,6 +569,7 @@ int eyeDoctor::appStartup()
     m_indiP_selectedCamera.add(pcf::IndiElement("current", m_selectedCamera));
     m_indiP_selectedCamera.add(pcf::IndiElement("target", m_selectedCamera));
     if(registerIndiPropertyNew(m_indiP_selectedCamera, &eyeDoctor::st_newCallBack_m_indiP_selectedCamera) < 0) return -1;
+    log<text_log>("eyeDoctor::appStartup() - Registered camera selection properties");
 
     // Setup Mode Range INDI Properties
     this->createStandardIndiNumber(m_indiP_startModeIndex, "startModeIndex", 1, 100, 1, "%d");
@@ -578,10 +588,7 @@ int eyeDoctor::appStartup()
     m_indiP_psfCoreRadiusPixels["target"].set(m_psfCoreRadiusPixels);
     if(registerIndiPropertyNew(m_indiP_psfCoreRadiusPixels, &eyeDoctor::st_newCallBack_m_indiP_psfCoreRadiusPixels) < 0) return -1;
 
-    // Note: searchRange is registered by dmWavefrontControl base class, so don't register it again here
-    // Just update the values after base class registration
-    m_indiP_searchRange["current"].set(m_searchRange);
-    m_indiP_searchRange["target"].set(m_searchRange);
+    // Note: searchRange is registered and managed by dmWavefrontControl base class
 
     this->createStandardIndiNumber(m_indiP_nSteps, "nSteps", 5, 100, 1, "%d");
     m_indiP_nSteps["current"].set(m_nSteps);
@@ -676,24 +683,33 @@ int eyeDoctor::appStartup()
     if(this->registerIndiPropertyNew(m_indiP_targetLatency, &eyeDoctor::st_newCallBack_m_indiP_targetLatency) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_autoOptimizeLatency, &eyeDoctor::st_newCallBack_m_indiP_autoOptimizeLatency) < 0) return -1;
     if(this->registerIndiPropertyNew(m_indiP_runOptimization, &eyeDoctor::st_newCallBack_m_indiP_runOptimization) < 0) return -1;
+    log<text_log>("eyeDoctor::appStartup() - Registered all algorithm parameter properties");
     
     // Start optimization thread (waits for toggle to be turned on)
     // Use a dummy INDI property for thread monitoring (not exposed to INDI)
     pcf::IndiProperty dummyThreadProp;
+    log<text_log>("eyeDoctor::appStartup() - Starting optimization thread");
     if(threadStart(m_optimizationThread, m_optimizationThreadInit, m_optimizationThreadPID, 
                    dummyThreadProp, 0, "", "optimization", this, optimizationThreadStart) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__, "Failed to start optimization thread"});
     }
+    log<text_log>("eyeDoctor::appStartup() - Optimization thread started");
 
     // Setup DM Metadata INDI properties
     this->createStandardIndiNumber(m_indiP_numActuators, "numActuators", 1, 100000, 1, "%d");
+    m_indiP_numActuators["current"].set(m_numActuators);
+    m_indiP_numActuators["target"].set(m_numActuators);
     if(registerIndiPropertyNew(m_indiP_numActuators, &eyeDoctor::st_newCallBack_m_indiP_numActuators) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_gridWidth, "gridWidth", 1, 1000, 1, "%d");
+    m_indiP_gridWidth["current"].set(m_gridWidth);
+    m_indiP_gridWidth["target"].set(m_gridWidth);
     if(registerIndiPropertyNew(m_indiP_gridWidth, &eyeDoctor::st_newCallBack_m_indiP_gridWidth) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_gridHeight, "gridHeight", 1, 1000, 1, "%d");
+    m_indiP_gridHeight["current"].set(m_gridHeight);
+    m_indiP_gridHeight["target"].set(m_gridHeight);
     if(registerIndiPropertyNew(m_indiP_gridHeight, &eyeDoctor::st_newCallBack_m_indiP_gridHeight) < 0) return -1;
 
     m_indiP_dmType = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -755,11 +771,21 @@ int eyeDoctor::appStartup()
     m_indiP_actuatorLimits.add(pcf::IndiElement("current", m_actuatorLimits));
     m_indiP_actuatorLimits.add(pcf::IndiElement("target", m_actuatorLimits));
     if(registerIndiPropertyNew(m_indiP_actuatorLimits, &eyeDoctor::st_newCallBack_m_indiP_actuatorLimits) < 0) return -1;
+    
+    log<text_log>("eyeDoctor::appStartup() - Registered all DM metadata properties");
 
     // Configure dmWavefrontControl base class with current settings
     updateDMConfiguration();
     updateCameraConfiguration();
     updateSearchParameters();
+    
+    // Initialize telemeter
+    if(telemeterT::appStartup() < 0)
+    {
+        return log<software_error,-1>({__FILE__,__LINE__});
+    }
+    
+    log<text_log>("eyeDoctor::appStartup() - Complete - all properties registered successfully");
 
     return 0;
 }
@@ -1320,6 +1346,7 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_ignoreFocus)(const pcf::IndiProperty &i
     return 0;
 }
 
+// searchRange callback: Base class registers the property, derived class implements the handler
 INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_searchRange)(const pcf::IndiProperty &ipRecv)
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_searchRange, ipRecv)
@@ -1329,8 +1356,10 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_searchRange)(const pcf::IndiProperty &i
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
-
-    // Update the dmWavefrontControl property
+   
+    m_searchRange = target;  // Base class member variable
+    updateIfChanged(m_indiP_searchRange, "current", m_searchRange);
+   
     return 0;
 }
 

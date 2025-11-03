@@ -719,35 +719,13 @@ dmWavefrontControl<derivedT>::dmWavefrontControl()
 template<class derivedT>
 dmWavefrontControl<derivedT>::~dmWavefrontControl()
 {
-    // Clear containers in reverse order of construction to avoid issues
-    // Clear map first, then vector (which contains eigenCube objects)
-    // Doing this explicitly helps ensure proper destruction order
-    try {
-        // Clear the map first (no complex types)
-        m_modeSetMap.clear();
-        
-        // Clear vectors that don't contain eigenCube
-        m_dmInfo.actuators.clear();
-        m_configDeadActuators.clear();
-        m_modesToOptimize.clear();
-        m_modeSetFiles.clear();
-        m_modeSetNames.clear();
-        m_mlatBuffer.clear();
-        
-        // Clear eigenImage types in DMInfo before clearing modesets
-        m_dmInfo.actuatorMask.resize(0, 0);
-        m_dmInfo.actuatorGains.resize(0, 0);
-        
-        // Finally clear modesets (contains eigenCube)
-        // Reset each modeset's eigenCube to empty before clearing the vector
-        for(auto& modeset : m_modeSets) {
-            // Resize eigenCube to empty to release memory safely
-            modeset.modes.resize(0, 0, 0);
-        }
-        m_modeSets.clear();
-    } catch(...) {
-        // Ignore exceptions in destructor
-    }
+    // Let default destructors handle cleanup
+    // Don't try to manually resize or clear - this can cause issues with
+    // Eigen types, especially if they were never initialized or are already
+    // being destroyed by their container destructors
+    // 
+    // The std::vector, std::map, and Eigen container destructors will
+    // properly clean up in the correct order automatically
 }
 
 // Implementation of enhanced DM control methods
