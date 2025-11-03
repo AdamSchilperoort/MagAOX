@@ -346,10 +346,10 @@ eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
     m_convergenceThreshold = 1e-6;
     m_adaptiveStepSize = true;
     
-    // Initialize DM metadata parameters
-    m_numActuators = 4096;
-    m_gridWidth = 64;
-    m_gridHeight = 64;
+    // Initialize DM metadata parameters (will be loaded from config)
+    m_numActuators = 0;  // MUST be 0 so config loading works
+    m_gridWidth = 0;     // MUST be 0 so config loading works
+    m_gridHeight = 0;    // MUST be 0 so config loading works
     m_dmType = "Boston Micromachines";
     m_deadActuators.clear();
     m_couplingMatrix = "";
@@ -464,25 +464,15 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
     _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
     
-    // DM Metadata Parameters - read from eyedoctor section first, fall back to dmWavefrontControl section
-    _config(m_numActuators, "eyedoctor.numActuators");
-    if(m_numActuators == 0) _config(m_numActuators, "dmWavefrontControl.numActuators");
-    
-    _config(m_gridWidth, "eyedoctor.gridWidth");
-    if(m_gridWidth == 0) _config(m_gridWidth, "dmWavefrontControl.gridWidth");
-    
-    _config(m_gridHeight, "eyedoctor.gridHeight");
-    if(m_gridHeight == 0) _config(m_gridHeight, "dmWavefrontControl.gridHeight");
-    
-    _config(m_dmType, "eyedoctor.dmType");
-    if(m_dmType.empty()) _config(m_dmType, "dmWavefrontControl.dmType");
-    
-    _config(m_deadActuators, "eyedoctor.deadActuators");
-    if(m_deadActuators.empty()) _config(m_deadActuators, "dmWavefrontControl.deadActuators");
-    
-    _config(m_couplingMatrix, "eyedoctor.couplingMatrix");
-    _config(m_actuatorGains, "eyedoctor.actuatorGains");
-    _config(m_actuatorLimits, "eyedoctor.actuatorLimits");
+    // DM Metadata Parameters - read from dmWavefrontControl section (REQUIRED)
+    _config(m_numActuators, "dmWavefrontControl.numActuators");
+    _config(m_gridWidth, "dmWavefrontControl.gridWidth");
+    _config(m_gridHeight, "dmWavefrontControl.gridHeight");
+    _config(m_dmType, "dmWavefrontControl.dmType");
+    _config(m_deadActuators, "dmWavefrontControl.deadActuators");
+    _config(m_couplingMatrix, "dmWavefrontControl.couplingMatrix");
+    _config(m_actuatorGains, "dmWavefrontControl.actuatorGains");
+    _config(m_actuatorLimits, "dmWavefrontControl.actuatorLimits");
 
     // Map DM device selection to actual device names and shared memory
     if(m_selectedDM == "wooferModes") {
