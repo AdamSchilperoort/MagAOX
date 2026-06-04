@@ -462,9 +462,23 @@ class XDevice(Device):
         log.debug(f"Writing PID file with PID {thisproc.pid}")
         subprocess.check_call(["sudo", "/opt/MagAOX/bin/write_magaox_pidfile", str(thisproc.pid), self.name])
 
+    def unlock_pid_file(self):
+        pid_file = self.prefix_dir + f"/sys/{self.name}/pid"
+        try:
+            os.remove(pid_file)
+            self.log.info("PID file removed: %s", pid_file)
+        except FileNotFoundError:
+            # Already cleaned up (or never created) is fine.
+            pass
+        except Exception:
+            self.log.exception("Failed to remove PID file %s", pid_file)
+
     def main(self):
         self.lock_pid_file()
-        super().main()
+        try:
+            super().main()
+        finally:
+            self.unlock_pid_file()
 
     def run(self):
         self.client = client.IndiClient()
