@@ -211,13 +211,13 @@ main(int argc, char** argv)
             {
 
                 // Default initial delay is 10s; use prefix to implement
-                // special cases for maximum intial delay i.e. for
-                // Hexbeaters that do not send hexbeats, so resurrector
-                // will never detect their Hexbeats as having expired
+                // special cases for maximum initial delay (for processes
+                // that do not send hexbeats, so resurrector will never
+                // detect their hexbeats as expired).
                 int init_delay = 10;
                 if      (dpfx=="-")    { init_delay = -1; }
                 else if (dpfx=="nhb:") { init_delay = -1; }
-                else if (dpfx=="py:")  { init_delay = -1; }
+                else if (dpfx=="py:")  { init_delay = 10; } // Python apps are expected to emit loop-tied hexbeats.
                 else                   { init_delay = 10; }
 
                 // If a FIFO with the driver name is not in the list,
