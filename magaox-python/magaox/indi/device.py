@@ -460,7 +460,7 @@ class XDevice(Device):
                         log.error(f"Found process ID {pid}: {proc.cmdline()} [{proc.status()}]")
                         sys.exit(1)
         log.debug(f"Writing PID file with PID {thisproc.pid}")
-        subprocess.check_call(["sudo", "/opt/MagAOX/bin/write_magaox_pidfile", str(thisproc.pid), self.name])
+        subprocess.check_call(["/opt/MagAOX/bin/write_magaox_pidfile", str(thisproc.pid), self.name])
 
     def unlock_pid_file(self):
         pid_file = self.prefix_dir + f"/sys/{self.name}/pid"
