@@ -44,7 +44,7 @@ class ResurrecteeConfig:
 class BaseConfig:
     common_path_prefix : pathlib.Path = xconf.field(default=DEFAULT_PREFIX, help="Prefix for all instrument data and config directories")
     sleep_interval_sec : float = xconf.field(default=1.0, help="Main loop logic will be run every `sleep_interval_sec` seconds")
-    resurrectee: ResurrecteeConfig = xconf.field(default=ResurrecteeConfig())
+    resurrectee: ResurrecteeConfig = xconf.field(default_factory=ResurrecteeConfig)
 
     _SECTION_RE = re.compile(r"^\s*\[(.+?)\]\s*$")
     _LEGACY_TIMEOUT_RE = re.compile(r"^(\s*timeout\s*=\s*)(\d+(?:\s*,\s*\d+)+)\s*(#.*)?$")
