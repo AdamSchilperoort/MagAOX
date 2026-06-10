@@ -211,8 +211,18 @@ function verb_status {
 
   ### Replace with PID from file /opt/MagAOX/sys/<name>/pid
   ### Also create null variables __resu_name_<pid>
-  eval $(eval "grep '^[0-9][0-9]*\$' /opt/MagAOX/sys/{${procnames//${delim}/,}}/pid 2>/dev/null | sed -e s,/pid:,=, -e 's=.*/==' -e 's/^/__resu_state_/' -e 's/^__resu_state_\([^=]*\)=\(..*\)\$/__resu_state_\1=\"0green=running (pid: \2)\";__resu_name_\2=\1;__resu_knownpids=\"\${__resu_knownpids}\2 \"/'")
-
+  eval $(
+     eval "
+        grep '^[0-9][0-9]*\$' \
+           /opt/MagAOX/sys/{${procnames//${delim}/,}}/pid \
+           2>/dev/null |
+        sed \
+           -e 's,/pid:,=,' \
+           -e 's=.*/==' \
+           -e 's/^/__resu_state_/' \
+           -e 's/^__resu_state_\([^=]*\)=\(..*\)\$/__resu_state_\1=\"0green=running (pid: \2)\";__resu_name_\2=\1;__resu_knownpids=\"\${__resu_knownpids}\2 \"/'
+         "
+  )
   __resu_knownpids="$__resu_knownpids"
 
   [ "$ripid" ] \
@@ -230,8 +240,21 @@ function verb_status {
   && ripath="$(find_resurrector_indi_path)" \
   && proclist_base="$($ripath -r $ROLE -cs - -pn)" \
   && proclist_cached="$($ripath -r $ROLE $CACHESUFFIXargs -pn)" \
-  && eval $(diff "$proclist_cached" "$proclist_base" -tdbwyW200 --suppress-common-lines --strip-trailing-cr | awk '{h4="#" $4}NF==5&&$2==$5&&$3=="|"&&h4==$1{gsub(/^-/,"",$4);gsub(/^[^:#[:space:]]*:/,"",$4);print "__resu_state_" $4 "=1yellow=\"disabled (probably)\""}')
-
+  && eval $(
+    diff "$proclist_cached" "$proclist_base" \
+        -tdbwyW200 \
+        --suppress-common-lines \
+        --strip-trailing-cr |
+    awk '{
+            h4="#" $4
+         }
+         NF==5 && $2==$5 && $3=="|" && h4==$1 {
+            gsub(/^-/,"",$4)
+            gsub(/^[^:#[:space:]]*:/,"",$4)
+            print "__resu_state_" $4 "=1yellow=\"disabled (probably)\""
+         }'
+  )
+  
   ### Outuput status of all processes
   set|grep -E '^__resu_state_' | sort -t= -k2,2 -k1,1 | tr -d \' \
   | sed -e "/=[0-9]green=/s/__resu_state_/$GREEN_SEQ/" \
