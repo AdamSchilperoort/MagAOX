@@ -11,7 +11,8 @@ apps_basic = \
 	timeSeriesSimulator \
 	mzmqClient
 pythonapps_basic = \
-	dbIngest
+	dbIngest \
+	magAOXMathsPy
 
 # Apps commmon to all MagAO-X control machines
 apps_common = \

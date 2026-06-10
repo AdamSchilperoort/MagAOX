@@ -15,4 +15,4 @@ authors = [
 ]
 
 [project.scripts]
-magAOXMathsPy = "magAOXMathsPy:magAOXMathsPy.console_app"
+magAOXMathsPy = "xapp.magAOXMathsPy:magAOXMathsPy.console_app"
