@@ -110,6 +110,7 @@ apps/koolanceCtrl/koolanceCtrl
 apps/loPredCtrl/loPredCtrl
 
 #m
+apps/magAOXMaths/magAOXMaths
 apps/mcp3008Ctrl/mcp3008Ctrl
 apps/modalFilter/modalFilter
 apps/modalGainOpt/modalGainOpt

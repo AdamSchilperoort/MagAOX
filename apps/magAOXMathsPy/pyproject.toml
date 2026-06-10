@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magAOXMathsPy"
+description = "Python INDI equivalent of magAOXMaths"
+version = "2026.06.03"
+dependencies = [
+  "xconf",
+  "purepyindi2",
+]
+authors = [
+  {name = "MagAO-X Developers"},
+]
+
+[project.scripts]
+magAOXMathsPy = "magAOXMathsPy:magAOXMathsPy.console_app"
