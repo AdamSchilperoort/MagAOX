@@ -23,7 +23,7 @@ instrument_group="$(stat -c '%G' /opt/MagAOX/drivers/fifos 2>/dev/null || echo m
 chown "root:${instrument_group}" "$appPidDir" 2>/dev/null || true
 chmod 775 "$appPidDir" 2>/dev/null || true
 
-echo "$pidNumber" > "$appPidDir/pid"
+echo "$pidNumber" > "$appPidDir/pid" || { echo "Failed to write $appPidDir/pid" >&2; exit 1; }
 
 # Match group/mode conventions expected by MagAO-X status tooling.
 chown "root:${instrument_group}" "$appPidDir/pid" 2>/dev/null || true
