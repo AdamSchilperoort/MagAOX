@@ -530,7 +530,9 @@ function find_all_procnames {
   || resu_failure "Readable process list file not found; exiting ..." \
   || return 1
 
-  cat "$proclist_txt" \
+  ### Append a newline to guarantee `read` sees a terminated final line,
+  ### even if the proclist file's last line is missing its newline.
+  ( cat "$proclist_txt" ; echo ) \
   | while read procname exe cruft ; do
       ### Ignore any line with a token count less than or greater than 2
       [ ! "$exe" ] && continue
