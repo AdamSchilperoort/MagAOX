@@ -44,29 +44,43 @@ namespace app
  * \ingroup eyeDoctor
  */
 class eyeDoctor : public MagAOXApp<true>,
-                 public dev::dmWavefrontControl<eyeDoctor>,
                  public dev::telemeter<eyeDoctor>
 {
     // Give the test harness access.
     friend class eyeDoctor_test;
 
-    friend class dev::dmWavefrontControl<eyeDoctor>;
-    
-    typedef dev::dmWavefrontControl<eyeDoctor> dmWavefrontControlT;
-
     friend class dev::telemeter<eyeDoctor>;
     typedef dev::telemeter<eyeDoctor> telemeterT;
+
+protected:
+    /** \name Wavefront Control Helper
+      * @{
+      */
+    
+    /// Utility class instance for wavefront sensing algorithms
+    dev::dmWavefrontControl m_wfsHelper;
+    
+    ///@}
 
 protected:
     /** \name Configurable Parameters
       *@{
      */
     
-    // DM Device Selection
-    std::vector<std::string> m_availableDMs;      ///< List of available DM devices
-    std::string m_selectedDM;                     ///< Currently selected DM device
-    std::string m_dmDeviceName;                   ///< Actual DM device name (dmwoofer, dmncpc, dmtweeter, dmkilo)
-    std::string m_dmShmimName;                    ///< DM shared memory name (dm00disp, dm01disp, dm02disp)
+    // DM Control Mode Selection
+    std::string m_dmControlMode;                  ///< "magaox" or "cacao" - determines interface type
+    
+    // MagAOX App Mode: Interface with MagAOX DM applications
+    std::vector<std::string> m_availableDMApps;   ///< List of available MagAOX DM apps (dmwoofer, dmtweeter, etc.)
+    std::string m_selectedDMApp;                  ///< Currently selected MagAOX DM app
+    
+    // CACAO Shmim Mode: Interface directly with CACAO streams
+    std::vector<std::string> m_availableDMShmims; ///< List of available CACAO DM shmims (dm00disp, dm01disp, etc.)
+    std::string m_selectedDMShmim;                ///< Currently selected CACAO DM shmim
+    
+    // Resolved DM names (set based on mode and selection)
+    std::string m_dmDeviceName;                   ///< Actual DM device name (for MagAOX app mode)
+    std::string m_dmShmimName;                    ///< DM shared memory name (for CACAO mode or app->shmim mapping)
     
     // Camera Selection
     std::vector<std::string> m_availableCameras;  ///< List of available cameras
@@ -76,9 +90,19 @@ protected:
     int m_startModeIndex;                         ///< Starting mode index to optimize
     int m_endModeIndex;                           ///< Ending mode index to optimize
     
+    // Camera/WFS Configuration
+    std::string m_wfsShmimName;          ///< WFS camera shared memory name
+    std::string m_wfsCameraName;         ///< WFS camera device name
+    std::string m_wfsDarkShmimName;      ///< Optional dark frame shmim
+    
+    // Modeset Configuration
+    std::vector<std::string> m_modesetFiles;  ///< List of modeset FITS files
+    std::vector<std::string> m_modesetNames;  ///< Names for each modeset
+    std::string m_defaultModeSet;             ///< Default modeset to use
+    
     // Algorithm Parameters (from console_comprehensive)
     double m_psfCoreRadiusPixels;        ///< Radius of the PSF core to measure
-    // Note: m_searchRange is inherited from dmWavefrontControl base class
+    double m_searchRange;                ///< Search range for optimization
     int m_nSteps;                        ///< Number of points to sample in grid search
     int m_nRepeats;                      ///< Number of sweeps
     int m_nClusterRepeats;               ///< Number of times to repeat a cluster of modes
@@ -182,11 +206,20 @@ protected:
       * @{
       */
 
-    // DM Device Selection
+    // DM Control Mode
+    pcf::IndiProperty m_indiP_dmControlMode;
+    
+    // MagAOX App Mode
+    pcf::IndiProperty m_indiP_availableDMApps;
+    pcf::IndiProperty m_indiP_selectedDMApp;
+    
+    // CACAO Shmim Mode
+    pcf::IndiProperty m_indiP_availableDMShmims;
+    pcf::IndiProperty m_indiP_selectedDMShmim;
+    
+    // Legacy property (for backward compatibility, shows current selection)
     pcf::IndiProperty m_indiP_availableDMs;
     pcf::IndiProperty m_indiP_selectedDM;
-    pcf::IndiProperty m_indiP_dmDeviceName;
-    pcf::IndiProperty m_indiP_dmShmimName;
 
     // Camera Selection
     pcf::IndiProperty m_indiP_availableCameras;
@@ -198,6 +231,7 @@ protected:
 
     // Algorithm Parameters
     pcf::IndiProperty m_indiP_psfCoreRadiusPixels;
+    pcf::IndiProperty m_indiP_searchRange;
     pcf::IndiProperty m_indiP_nSteps;
     pcf::IndiProperty m_indiP_nRepeats;
     pcf::IndiProperty m_indiP_nClusterRepeats;
@@ -219,6 +253,9 @@ protected:
     bool m_optimizationThreadInit{false};
     pid_t m_optimizationThreadPID{0};
     static void optimizationThreadStart(eyeDoctor *e);
+    
+    // INDI property sending flag
+    bool m_indiPropertiesSent{false};
     void optimizationThreadExec();
 
     // Algorithm-specific INDI properties
@@ -235,15 +272,17 @@ protected:
     pcf::IndiProperty m_indiP_actuatorGains;
     pcf::IndiProperty m_indiP_actuatorLimits;
 
-    // Callback declarations for dmWavefrontControl properties
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeAmplitude);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmPokeDelay);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_wfsCamera);
-    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_psfCoreRadius);
-
     // Callback declarations for eyeDoctor-specific properties
+    
+    // DM Control Mode callbacks
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_dmControlMode);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedDMApp);
+    INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedDMShmim);
+    
+    // Legacy callbacks (for backward compatibility)
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_availableDMs);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedDM);
+    
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_selectedCamera);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_startModeIndex);
     INDI_NEWCALLBACK_DECL(eyeDoctor, m_indiP_endModeIndex);
@@ -310,9 +349,12 @@ private:
 
 eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
 {
-    // Initialize DM device parameters
-    m_availableDMs = {"wooferModes", "ncpcModes", "tweeterModes", "kiloModes"};
-    m_selectedDM = "tweeterModes";
+    // Initialize DM control mode and device parameters
+    m_dmControlMode = "magaox";  // Default to MagAOX app mode
+    m_availableDMApps = {"dmwoofer", "dmncpc", "dmtweeter", "dmkilo"};
+    m_selectedDMApp = "dmtweeter";
+    m_availableDMShmims = {"dm00disp", "dm01disp", "dm02disp"};
+    m_selectedDMShmim = "dm01disp";
     m_dmDeviceName = "dmtweeter";
     m_dmShmimName = "dm01disp";
     
@@ -362,12 +404,15 @@ eyeDoctor::eyeDoctor() : MagAOXApp(MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED)
     m_currentModeIndex = 0;
     m_totalModes = 1; // Placeholder - parse from m_modesToOptimize
     
-    // Initialize DM device mapping
+    // Initialize DM control mode
+    m_dmControlMode = "magaox"; // Default to MagAOX app mode
+    
+    // Initialize DM device mapping for MagAOX mode
     m_dmDeviceMap = {
-        {"wooferModes", {"dmwoofer", "dm00disp", "DM Woofer"}},
-        {"ncpcModes", {"dmncpc", "dm02disp", "DM NCPc"}},
-        {"tweeterModes", {"dmtweeter", "dm01disp", "DM Tweeter"}},
-        {"kiloModes", {"dmkilo", "dm00disp", "DM Kilo"}}
+        {"dmwoofer", {"dmwoofer", "dm00disp", "DM Woofer"}},
+        {"dmncpc", {"dmncpc", "dm02disp", "DM NCPc"}},
+        {"dmtweeter", {"dmtweeter", "dm01disp", "DM Tweeter"}},
+        {"dmkilo", {"dmkilo", "dm00disp", "DM Kilo"}}
     };
     
     return;
@@ -377,12 +422,17 @@ void eyeDoctor::setupConfig()
 {
     // Call base class setupConfig first
     MagAOXApp<true>::setupConfig();
-    
-    DMWAVEFRONTCONTROL_SETUP_CONFIG(config);
 
-    // DM Device Selection
-    config.add("eyedoctor.availableDMs", "", "eyedoctor.availableDMs", argType::Required, "eyedoctor", "availableDMs", false, "vector<string>", "List of available DM devices");
-    config.add("eyedoctor.selectedDM", "", "eyedoctor.selectedDM", argType::Required, "eyedoctor", "selectedDM", false, "string", "Selected DM device");
+    // DM Control Mode
+    config.add("eyedoctor.dmControlMode", "", "eyedoctor.dmControlMode", argType::Optional, "eyedoctor", "dmControlMode", false, "string", "DM control mode: 'magaox' (interface with MagAOX apps) or 'cacao' (direct shmim)");
+    
+    // MagAOX App Mode: DM Application Selection
+    config.add("eyedoctor.availableDMApps", "", "eyedoctor.availableDMApps", argType::Optional, "eyedoctor", "availableDMApps", false, "vector<string>", "List of available MagAOX DM apps (dmwoofer, dmtweeter, dmkilo, etc.)");
+    config.add("eyedoctor.selectedDMApp", "", "eyedoctor.selectedDMApp", argType::Optional, "eyedoctor", "selectedDMApp", false, "string", "Selected MagAOX DM app (for magaox mode)");
+    
+    // CACAO Shmim Mode: Direct shmim Selection
+    config.add("eyedoctor.availableDMShmims", "", "eyedoctor.availableDMShmims", argType::Optional, "eyedoctor", "availableDMShmims", false, "vector<string>", "List of available CACAO DM shmims (dm00disp, dm01disp, dm02disp, etc.)");
+    config.add("eyedoctor.selectedDMShmim", "", "eyedoctor.selectedDMShmim", argType::Optional, "eyedoctor", "selectedDMShmim", false, "string", "Selected CACAO DM shmim (for cacao mode)");
     
     // Camera Selection
     config.add("eyedoctor.availableCameras", "", "eyedoctor.availableCameras", argType::Required, "eyedoctor", "availableCameras", false, "vector<string>", "List of available cameras");
@@ -424,15 +474,35 @@ void eyeDoctor::setupConfig()
     config.add("eyedoctor.couplingMatrix", "", "eyedoctor.couplingMatrix", argType::Optional, "eyedoctor", "couplingMatrix", false, "string", "Path to coupling matrix file (optional)");
     config.add("eyedoctor.actuatorGains", "", "eyedoctor.actuatorGains", argType::Optional, "eyedoctor", "actuatorGains", false, "string", "Path to actuator gains file (optional)");
     config.add("eyedoctor.actuatorLimits", "", "eyedoctor.actuatorLimits", argType::Optional, "eyedoctor", "actuatorLimits", false, "string", "Path to actuator limits file (optional)");
+    
+    // DM and Camera Configuration
+    config.add("eyedoctor.dmDeviceName", "", "eyedoctor.dmDeviceName", argType::Optional, "eyedoctor", "dmDeviceName", false, "string", "DM device name (dmkilo, dmtweeter, etc.)");
+    config.add("eyedoctor.dmShmimName", "", "eyedoctor.dmShmimName", argType::Optional, "eyedoctor", "dmShmimName", false, "string", "DM shared memory name (dm00disp, dm01disp, etc.)");
+    config.add("eyedoctor.deviceName", "", "eyedoctor.deviceName", argType::Optional, "eyedoctor", "deviceName", false, "string", "DM device/shmim channel name (e.g., dm00disp06)");
+    config.add("eyedoctor.wfsShmimName", "", "eyedoctor.wfsShmimName", argType::Optional, "eyedoctor", "wfsShmimName", false, "string", "WFS camera shared memory name");
+    config.add("eyedoctor.wfsCameraName", "", "eyedoctor.wfsCameraName", argType::Optional, "eyedoctor", "wfsCameraName", false, "string", "WFS camera device name");
+    config.add("eyedoctor.wfsDarkShmimName", "", "eyedoctor.wfsDarkShmimName", argType::Optional, "eyedoctor", "wfsDarkShmimName", false, "string", "WFS dark frame shmim name (optional)");
+    config.add("eyedoctor.actuator_spacing", "", "eyedoctor.actuator_spacing", argType::Optional, "eyedoctor", "actuator_spacing", false, "float", "Actuator spacing in mm");
+    config.add("eyedoctor.max_stroke", "", "eyedoctor.max_stroke", argType::Optional, "eyedoctor", "max_stroke", false, "float", "Maximum stroke in microns");
+    
+    // Modeset Configuration
+    config.add("eyedoctor.modesets", "", "eyedoctor.modesets", argType::Optional, "eyedoctor", "modesets", false, "string", "Comma-separated list of modeset FITS file paths");
+    config.add("eyedoctor.modeset_names", "", "eyedoctor.modeset_names", argType::Optional, "eyedoctor", "modeset_names", false, "string", "Comma-separated list of names for each modeset");
+    config.add("eyedoctor.default_modeset", "", "eyedoctor.default_modeset", argType::Optional, "eyedoctor", "default_modeset", false, "string", "Name of the default modeset to use");
 }
 
 int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
 {
-    DMWAVEFRONTCONTROL_LOAD_CONFIG(_config);
-
-    // DM Device Selection
-    _config(m_availableDMs, "eyedoctor.availableDMs");
-    _config(m_selectedDM, "eyedoctor.selectedDM");
+    // DM Control Mode
+    _config(m_dmControlMode, "eyedoctor.dmControlMode");
+    
+    // MagAOX App Mode: DM Application Selection
+    _config(m_availableDMApps, "eyedoctor.availableDMApps");
+    _config(m_selectedDMApp, "eyedoctor.selectedDMApp");
+    
+    // CACAO Shmim Mode: Direct shmim Selection
+    _config(m_availableDMShmims, "eyedoctor.availableDMShmims");
+    _config(m_selectedDMShmim, "eyedoctor.selectedDMShmim");
     
     // Camera Selection
     _config(m_availableCameras, "eyedoctor.availableCameras");
@@ -444,7 +514,7 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     
     // Algorithm Parameters
     _config(m_psfCoreRadiusPixels, "eyedoctor.psfCoreRadiusPixels");
-    // Note: m_searchRange is loaded by dmWavefrontControl base class from dmWavefrontControl.searchRange
+    _config(m_searchRange, "eyedoctor.searchRange");
     _config(m_nSteps, "eyedoctor.nSteps");
     _config(m_nRepeats, "eyedoctor.nRepeats");
     _config(m_nClusterRepeats, "eyedoctor.nClusterRepeats");
@@ -464,33 +534,92 @@ int eyeDoctor::loadConfigImpl( mx::app::appConfigurator & _config )
     _config(m_convergenceThreshold, "eyedoctor.convergenceThreshold");
     _config(m_adaptiveStepSize, "eyedoctor.adaptiveStepSize");
     
-    // DM Metadata Parameters - read from dmWavefrontControl section (REQUIRED)
-    _config(m_numActuators, "dmWavefrontControl.numActuators");
-    _config(m_gridWidth, "dmWavefrontControl.gridWidth");
-    _config(m_gridHeight, "dmWavefrontControl.gridHeight");
-    _config(m_dmType, "dmWavefrontControl.dmType");
-    _config(m_deadActuators, "dmWavefrontControl.deadActuators");
-    _config(m_couplingMatrix, "dmWavefrontControl.couplingMatrix");
-    _config(m_actuatorGains, "dmWavefrontControl.actuatorGains");
-    _config(m_actuatorLimits, "dmWavefrontControl.actuatorLimits");
+    // DM Metadata Parameters
+    _config(m_numActuators, "eyedoctor.numActuators");
+    _config(m_gridWidth, "eyedoctor.gridWidth");
+    _config(m_gridHeight, "eyedoctor.gridHeight");
+    _config(m_dmType, "eyedoctor.dmType");
+    _config(m_deadActuators, "eyedoctor.deadActuators");
+    _config(m_couplingMatrix, "eyedoctor.couplingMatrix");
+    _config(m_actuatorGains, "eyedoctor.actuatorGains");
+    _config(m_actuatorLimits, "eyedoctor.actuatorLimits");
+    
+    // DM and Camera Configuration (these will be set by mode resolution or used as overrides)
+    std::string overrideDmDevice, overrideDmShmim;
+    _config(overrideDmDevice, "eyedoctor.dmDeviceName");
+    _config(overrideDmShmim, "eyedoctor.dmShmimName");
+    _config(m_wfsShmimName, "eyedoctor.wfsShmimName");
+    _config(m_wfsCameraName, "eyedoctor.wfsCameraName");
+    _config(m_wfsDarkShmimName, "eyedoctor.wfsDarkShmimName");
+    
+    // Modeset Configuration
+    std::string modesetStr, modesetNamesStr;
+    _config(modesetStr, "eyedoctor.modesets");
+    _config(modesetNamesStr, "eyedoctor.modeset_names");
+    _config(m_defaultModeSet, "eyedoctor.default_modeset");
+    
+    // Parse comma-separated modeset files
+    if (!modesetStr.empty()) {
+        std::stringstream ss(modesetStr);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            // Trim whitespace
+            item.erase(0, item.find_first_not_of(" \t\n\r"));
+            item.erase(item.find_last_not_of(" \t\n\r") + 1);
+            if (!item.empty()) {
+                m_modesetFiles.push_back(item);
+            }
+        }
+    }
+    
+    // Parse comma-separated modeset names
+    if (!modesetNamesStr.empty()) {
+        std::stringstream ss(modesetNamesStr);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            // Trim whitespace
+            item.erase(0, item.find_first_not_of(" \t\n\r"));
+            item.erase(item.find_last_not_of(" \t\n\r") + 1);
+            if (!item.empty()) {
+                m_modesetNames.push_back(item);
+            }
+        }
+    }
 
-    // Map DM device selection to actual device names and shared memory
-    if(m_selectedDM == "wooferModes") {
-        m_dmDeviceName = "dmwoofer";
-        m_dmShmimName = "dm00disp";
-    } else if(m_selectedDM == "ncpcModes") {
-        m_dmDeviceName = "dmncpc";
-        m_dmShmimName = "dm02disp";
-    } else if(m_selectedDM == "tweeterModes") {
-        m_dmDeviceName = "dmtweeter";
-        m_dmShmimName = "dm01disp";
-    } else if(m_selectedDM == "kiloModes") {
-        m_dmDeviceName = "dmkilo";
-        m_dmShmimName = "dm00disp";
+    // Resolve DM names based on control mode
+    if (m_dmControlMode == "magaox") {
+        // MagAOX App Mode: Use selected app name and map to shmim
+        if (!m_selectedDMApp.empty()) {
+            m_dmDeviceName = m_selectedDMApp;
+            
+            // Map app name to corresponding shmim
+            if (m_dmDeviceMap.find(m_selectedDMApp) != m_dmDeviceMap.end()) {
+                m_dmShmimName = m_dmDeviceMap[m_selectedDMApp].shmimName;
+            } else {
+                log<text_log>("Unknown DM app: " + m_selectedDMApp + ", using deviceName from config", logPrio::LOG_WARNING);
+            }
+        }
+    } else if (m_dmControlMode == "cacao") {
+        // CACAO Shmim Mode: Use selected shmim directly
+        if (!m_selectedDMShmim.empty()) {
+            m_dmShmimName = m_selectedDMShmim;
+            m_dmDeviceName = "";  // Not interfacing with a MagAOX app
+            log<text_log>("Using CACAO mode with shmim: " + m_dmShmimName, logPrio::LOG_INFO);
+        }
     } else {
-        // Default to tweeter if invalid selection
-        m_dmDeviceName = "dmtweeter";
-        m_dmShmimName = "dm01disp";
+        log<text_log>("Invalid dmControlMode: " + m_dmControlMode + " (must be 'magaox' or 'cacao')", logPrio::LOG_ERROR);
+        return -1;
+    }
+    
+    // Apply explicit overrides if provided
+    // (These can be used for manual configuration or backward compatibility)
+    if (!overrideDmDevice.empty()) {
+        m_dmDeviceName = overrideDmDevice;
+        log<text_log>("DM device name overridden to: " + m_dmDeviceName, logPrio::LOG_INFO);
+    }
+    if (!overrideDmShmim.empty()) {
+        m_dmShmimName = overrideDmShmim;
+        log<text_log>("DM shmim name overridden to: " + m_dmShmimName, logPrio::LOG_INFO);
     }
 
     // Calculate total number of modes from start and end indices
@@ -514,39 +643,144 @@ void eyeDoctor::loadConfig()
 
 int eyeDoctor::appStartup()
 {
-    log<text_log>("eyeDoctor::appStartup() - Starting base class initialization");
+    log<text_log>("eyeDoctor::appStartup() - Starting initialization");
     
-    if(dmWavefrontControlT::appStartup() < 0)
+    // Initialize helper class with DM metadata
+    m_wfsHelper.m_dmInfo.name = m_dmDeviceName;
+    m_wfsHelper.m_dmInfo.numActuators = m_numActuators;
+    m_wfsHelper.m_dmInfo.width = m_gridWidth;
+    m_wfsHelper.m_dmInfo.height = m_gridHeight;
+    m_wfsHelper.m_dmInfo.actuatorSpacing = 0.4; // From config or default
+    m_wfsHelper.m_dmInfo.maxStroke = 5.0; // From config or default
+    
+    if (m_wfsHelper.initializeDMMetadata() < 0)
     {
-        log<software_error>({__FILE__, __LINE__, "dmWavefrontControl::appStartup() failed"});
+        log<software_error>({__FILE__, __LINE__, "Failed to initialize DM metadata"});
         return -1;
     }
     
-    log<text_log>("eyeDoctor::appStartup() - Base class initialization complete, registering eyeDoctor properties");
+    // Load modesets
+    if (!m_modesetFiles.empty())
+    {
+        for (size_t i = 0; i < m_modesetFiles.size(); ++i)
+        {
+            std::string name = (i < m_modesetNames.size()) ? m_modesetNames[i] : "modeset_" + std::to_string(i);
+            int result = m_wfsHelper.loadModeSet(m_modesetFiles[i], name);
+            if (result < 0)
+            {
+                log<software_error>({__FILE__, __LINE__, "Failed to load modeset from " + m_modesetFiles[i] + " (error code: " + std::to_string(result) + ")"});
+                return -1;
+            }
+            log<text_log>("Loaded modeset '" + name + "' from " + m_modesetFiles[i]);
+        }
+        m_wfsHelper.m_defaultModeSet = m_defaultModeSet;
+    }
+    
+    log<text_log>("eyeDoctor::appStartup() - Helper class initialized, registering INDI properties");
 
-    // Setup Available DMs INDI Property (Read-only)
+    // ========== DM CONTROL MODE PROPERTIES ==========
+    
+    // DM Control Mode (magaox or cacao)
+    m_indiP_dmControlMode = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_dmControlMode.setDevice(this->configName());
+    m_indiP_dmControlMode.setName("dmControlMode");
+    m_indiP_dmControlMode.setGroup("dm_config");
+    m_indiP_dmControlMode.setLabel("DM Control Mode");
+    m_indiP_dmControlMode.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_dmControlMode.setState(pcf::IndiProperty::Idle);
+    m_indiP_dmControlMode.add(pcf::IndiElement("current", m_dmControlMode));
+    m_indiP_dmControlMode.add(pcf::IndiElement("target", m_dmControlMode));
+    if(registerIndiPropertyNew(m_indiP_dmControlMode, &eyeDoctor::st_newCallBack_m_indiP_dmControlMode) < 0) return -1;
+    
+    // ========== MAGAOX APP MODE PROPERTIES ==========
+    
+    // Available MagAOX DM Apps (read-only list as comma-separated string)
+    std::string availableAppsStr = "";
+    for (size_t i = 0; i < m_availableDMApps.size(); ++i) {
+        if (i > 0) availableAppsStr += ",";
+        availableAppsStr += m_availableDMApps[i];
+    }
+    m_indiP_availableDMApps = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_availableDMApps.setDevice(this->configName());
+    m_indiP_availableDMApps.setName("availableDMApps");
+    m_indiP_availableDMApps.setGroup("dm_config");
+    m_indiP_availableDMApps.setLabel("Available MagAOX DM Apps");
+    m_indiP_availableDMApps.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_availableDMApps.setState(pcf::IndiProperty::Idle);
+    m_indiP_availableDMApps.add(pcf::IndiElement("current", availableAppsStr));
+    if(registerIndiPropertyReadOnly(m_indiP_availableDMApps) < 0) return -1;
+    
+    // Selected MagAOX DM App
+    m_indiP_selectedDMApp = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_selectedDMApp.setDevice(this->configName());
+    m_indiP_selectedDMApp.setName("selectedDMApp");
+    m_indiP_selectedDMApp.setGroup("dm_config");
+    m_indiP_selectedDMApp.setLabel("Selected MagAOX DM App");
+    m_indiP_selectedDMApp.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_selectedDMApp.setState(pcf::IndiProperty::Idle);
+    m_indiP_selectedDMApp.add(pcf::IndiElement("current", m_selectedDMApp));
+    m_indiP_selectedDMApp.add(pcf::IndiElement("target", m_selectedDMApp));
+    if(registerIndiPropertyNew(m_indiP_selectedDMApp, &eyeDoctor::st_newCallBack_m_indiP_selectedDMApp) < 0) return -1;
+    
+    // ========== CACAO SHMIM MODE PROPERTIES ==========
+    
+    // Available CACAO DM Shmims (read-only list as comma-separated string)
+    std::string availableShmimsStr = "";
+    for (size_t i = 0; i < m_availableDMShmims.size(); ++i) {
+        if (i > 0) availableShmimsStr += ",";
+        availableShmimsStr += m_availableDMShmims[i];
+    }
+    m_indiP_availableDMShmims = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_availableDMShmims.setDevice(this->configName());
+    m_indiP_availableDMShmims.setName("availableDMShmims");
+    m_indiP_availableDMShmims.setGroup("dm_config");
+    m_indiP_availableDMShmims.setLabel("Available CACAO DM Shmims");
+    m_indiP_availableDMShmims.setPerm(pcf::IndiProperty::ReadOnly);
+    m_indiP_availableDMShmims.setState(pcf::IndiProperty::Idle);
+    m_indiP_availableDMShmims.add(pcf::IndiElement("current", availableShmimsStr));
+    if(registerIndiPropertyReadOnly(m_indiP_availableDMShmims) < 0) return -1;
+    
+    // Selected CACAO DM Shmim
+    m_indiP_selectedDMShmim = pcf::IndiProperty(pcf::IndiProperty::Text);
+    m_indiP_selectedDMShmim.setDevice(this->configName());
+    m_indiP_selectedDMShmim.setName("selectedDMShmim");
+    m_indiP_selectedDMShmim.setGroup("dm_config");
+    m_indiP_selectedDMShmim.setLabel("Selected CACAO DM Shmim");
+    m_indiP_selectedDMShmim.setPerm(pcf::IndiProperty::ReadWrite);
+    m_indiP_selectedDMShmim.setState(pcf::IndiProperty::Idle);
+    m_indiP_selectedDMShmim.add(pcf::IndiElement("current", m_selectedDMShmim));
+    m_indiP_selectedDMShmim.add(pcf::IndiElement("target", m_selectedDMShmim));
+    if(registerIndiPropertyNew(m_indiP_selectedDMShmim, &eyeDoctor::st_newCallBack_m_indiP_selectedDMShmim) < 0) return -1;
+    
+    // ========== LEGACY PROPERTIES (BACKWARD COMPATIBILITY) ==========
+    
+    // Determine current selection based on control mode for legacy property
+    std::string currentDMSelection = (m_dmControlMode == "magaox") ? m_selectedDMApp : m_selectedDMShmim;
+    
+    // Legacy: Available DMs (Read-only) - shows current selection
     m_indiP_availableDMs = pcf::IndiProperty(pcf::IndiProperty::Text);
     m_indiP_availableDMs.setDevice(this->configName());
     m_indiP_availableDMs.setName("availableDMs");
     m_indiP_availableDMs.setGroup("main");
-    m_indiP_availableDMs.setLabel("Available DM Devices");
+    m_indiP_availableDMs.setLabel("Current DM (" + m_dmControlMode + " mode)");
     m_indiP_availableDMs.setPerm(pcf::IndiProperty::ReadOnly);
     m_indiP_availableDMs.setState(pcf::IndiProperty::Idle);
-    m_indiP_availableDMs.add(pcf::IndiElement("current", m_selectedDM));
+    m_indiP_availableDMs.add(pcf::IndiElement("current", currentDMSelection));
     if(registerIndiPropertyReadOnly(m_indiP_availableDMs) < 0) return -1;
 
-    // Setup DM Device Selection INDI Property
+    // Legacy: DM Device Selection (redirects to appropriate mode)
     m_indiP_selectedDM = pcf::IndiProperty(pcf::IndiProperty::Text);
     m_indiP_selectedDM.setDevice(this->configName());
     m_indiP_selectedDM.setName("selectedDM");
     m_indiP_selectedDM.setGroup("main");
-    m_indiP_selectedDM.setLabel("Selected DM Device");
+    m_indiP_selectedDM.setLabel("Selected DM");
     m_indiP_selectedDM.setPerm(pcf::IndiProperty::ReadWrite);
     m_indiP_selectedDM.setState(pcf::IndiProperty::Idle);
-    m_indiP_selectedDM.add(pcf::IndiElement("current", m_selectedDM));
-    m_indiP_selectedDM.add(pcf::IndiElement("target", m_selectedDM));
+    m_indiP_selectedDM.add(pcf::IndiElement("current", currentDMSelection));
+    m_indiP_selectedDM.add(pcf::IndiElement("target", currentDMSelection));
     if(registerIndiPropertyNew(m_indiP_selectedDM, &eyeDoctor::st_newCallBack_m_indiP_selectedDM) < 0) return -1;
-    log<text_log>("eyeDoctor::appStartup() - Registered DM selection properties");
+    
+    log<text_log>("eyeDoctor::appStartup() - Registered DM control mode properties (mode: " + m_dmControlMode + ")");
 
     // Setup Camera Selection INDI Property
     m_indiP_selectedCamera = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -578,7 +812,11 @@ int eyeDoctor::appStartup()
     m_indiP_psfCoreRadiusPixels["target"].set(m_psfCoreRadiusPixels);
     if(registerIndiPropertyNew(m_indiP_psfCoreRadiusPixels, &eyeDoctor::st_newCallBack_m_indiP_psfCoreRadiusPixels) < 0) return -1;
 
-    // Note: searchRange is registered and managed by dmWavefrontControl base class
+    // Register searchRange property
+    this->createStandardIndiNumber(m_indiP_searchRange, "searchRange", 0.1, 10.0, 0.1, "%0.3f");
+    m_indiP_searchRange["current"].set(m_searchRange);
+    m_indiP_searchRange["target"].set(m_searchRange);
+    if(registerIndiPropertyNew(m_indiP_searchRange, &eyeDoctor::st_newCallBack_m_indiP_searchRange) < 0) return -1;
 
     this->createStandardIndiNumber(m_indiP_nSteps, "nSteps", 5, 100, 1, "%d");
     m_indiP_nSteps["current"].set(m_nSteps);
@@ -590,10 +828,17 @@ int eyeDoctor::appStartup()
     m_indiP_nRepeats["target"].set(m_nRepeats);
     if(registerIndiPropertyNew(m_indiP_nRepeats, &eyeDoctor::st_newCallBack_m_indiP_nRepeats) < 0) return -1;
 
+    log<text_log>("About to create nImages property");
     this->createStandardIndiNumber(m_indiP_nImages, "nImages", 1, 10, 1, "%d");
+    log<text_log>("Created nImages property - device: " + m_indiP_nImages.getDevice() + ", name: " + m_indiP_nImages.getName());
     m_indiP_nImages["current"].set(m_nImages);
     m_indiP_nImages["target"].set(m_nImages);
-    if(registerIndiPropertyNew(m_indiP_nImages, &eyeDoctor::st_newCallBack_m_indiP_nImages) < 0) return -1;
+    log<text_log>("Set nImages current=" + std::to_string(m_nImages) + ", about to register");
+    if(registerIndiPropertyNew(m_indiP_nImages, &eyeDoctor::st_newCallBack_m_indiP_nImages) < 0) {
+        log<software_error>({__FILE__, __LINE__, "Failed to register nImages"});
+        return -1;
+    }
+    log<text_log>("Successfully registered nImages with key: " + m_indiP_nImages.createUniqueKey());
     
     this->createStandardIndiNumber(m_indiP_nClusterRepeats, "nClusterRepeats", 1, 10, 1, "%d");
     m_indiP_nClusterRepeats["current"].set(m_nClusterRepeats);
@@ -627,6 +872,12 @@ int eyeDoctor::appStartup()
     if(registerIndiPropertyNew(m_indiP_ignoreFocus, &eyeDoctor::st_newCallBack_m_indiP_ignoreFocus) < 0) return -1;
 
     // Setup eyeDoctor-specific INDI properties
+    // Available Cameras (comma-separated list)
+    std::string cameraListStr = "";
+    for (size_t i = 0; i < m_availableCameras.size(); ++i) {
+        if (i > 0) cameraListStr += ",";
+        cameraListStr += m_availableCameras[i];
+    }
     m_indiP_availableCameras = pcf::IndiProperty(pcf::IndiProperty::Text);
     m_indiP_availableCameras.setDevice(this->configName());
     m_indiP_availableCameras.setName("availableCameras");
@@ -634,7 +885,7 @@ int eyeDoctor::appStartup()
     m_indiP_availableCameras.setLabel("Available Cameras");
     m_indiP_availableCameras.setPerm(pcf::IndiProperty::ReadOnly);
     m_indiP_availableCameras.setState(pcf::IndiProperty::Idle);
-    m_indiP_availableCameras.add(pcf::IndiElement("current", m_selectedCamera));
+    m_indiP_availableCameras.add(pcf::IndiElement("current", cameraListStr));
     if(registerIndiPropertyReadOnly(m_indiP_availableCameras) < 0) return -1;
 
     m_indiP_results = pcf::IndiProperty(pcf::IndiProperty::Text);
@@ -675,17 +926,6 @@ int eyeDoctor::appStartup()
     if(this->registerIndiPropertyNew(m_indiP_runOptimization, &eyeDoctor::st_newCallBack_m_indiP_runOptimization) < 0) return -1;
     log<text_log>("eyeDoctor::appStartup() - Registered all algorithm parameter properties");
     
-    // Start optimization thread (waits for toggle to be turned on)
-    // Use a dummy INDI property for thread monitoring (not exposed to INDI)
-    pcf::IndiProperty dummyThreadProp;
-    log<text_log>("eyeDoctor::appStartup() - Starting optimization thread");
-    if(threadStart(m_optimizationThread, m_optimizationThreadInit, m_optimizationThreadPID, 
-                   dummyThreadProp, 0, "", "optimization", this, optimizationThreadStart) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__, "Failed to start optimization thread"});
-    }
-    log<text_log>("eyeDoctor::appStartup() - Optimization thread started");
-
     // Setup DM Metadata INDI properties
     this->createStandardIndiNumber(m_indiP_numActuators, "numActuators", 1, 100000, 1, "%d");
     m_indiP_numActuators["current"].set(m_numActuators);
@@ -775,17 +1015,96 @@ int eyeDoctor::appStartup()
         return log<software_error,-1>({__FILE__,__LINE__});
     }
     
+    log<text_log>("eyeDoctor::appStartup() - All INDI properties registered, starting optimization thread");
+    
+    // Start optimization thread (waits for toggle to be turned on)
+    // Use a dummy INDI property for thread monitoring (not exposed to INDI)
+    pcf::IndiProperty dummyThreadProp;
+    if(threadStart(m_optimizationThread, m_optimizationThreadInit, m_optimizationThreadPID, 
+                   dummyThreadProp, 0, "", "optimization", this, optimizationThreadStart) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__, "Failed to start optimization thread"});
+    }
+    log<text_log>("eyeDoctor::appStartup() - Optimization thread started successfully");
+    
     log<text_log>("eyeDoctor::appStartup() - Complete - all properties registered successfully");
+    log<text_log>("eyeDoctor::appStartup() - Properties will be sent to INDI server when communications are initialized");
 
     return 0;
 }
 
 int eyeDoctor::appLogic()
 {
-    DMWAVEFRONTCONTROL_APP_LOGIC;
-
-    // Update eyeDoctor-specific INDI properties
-    updateIfChanged(m_indiP_availableCameras, "current", m_selectedCamera);
+    // Send properties to INDI server once when communications are ready
+    if (!m_indiPropertiesSent && m_indiDriver != nullptr)
+    {
+        // Try to send a test property to see if INDI is ready
+        // If it works, send all our properties
+        if (sendNewProperty(m_indiP_dmControlMode) >= 0)
+        {
+            // INDI is ready, send all properties (only if they have valid device names, indicating they're initialized)
+            // Helper lambda to safely send a property
+            auto safeSend = [this](pcf::IndiProperty &prop) {
+                if (prop.hasValidDevice() && prop.hasValidName() && prop.getType() != pcf::IndiProperty::Unknown) {
+                    return sendNewProperty(prop);
+                }
+                return 0; // Skip if not properly initialized
+            };
+            
+            // DM Control Mode properties
+            safeSend(m_indiP_availableDMApps);
+            safeSend(m_indiP_selectedDMApp);
+            safeSend(m_indiP_availableDMShmims);
+            safeSend(m_indiP_selectedDMShmim);
+            
+            // Legacy DM properties
+            safeSend(m_indiP_availableDMs);
+            safeSend(m_indiP_selectedDM);
+            
+            // Camera properties
+            safeSend(m_indiP_availableCameras);
+            safeSend(m_indiP_selectedCamera);
+            
+            // Mode range properties
+            safeSend(m_indiP_startModeIndex);
+            safeSend(m_indiP_endModeIndex);
+            
+            // Algorithm parameters
+            safeSend(m_indiP_psfCoreRadiusPixels);
+            safeSend(m_indiP_searchRange);
+            safeSend(m_indiP_nSteps);
+            safeSend(m_indiP_nRepeats);
+            safeSend(m_indiP_nClusterRepeats);
+            safeSend(m_indiP_nSeqRepeat);
+            safeSend(m_indiP_nImages);
+            safeSend(m_indiP_cenX);
+            safeSend(m_indiP_cenY);
+            safeSend(m_indiP_skipFrames);
+            safeSend(m_indiP_resetToZero);
+            safeSend(m_indiP_ignoreFocus);
+            
+            // Optimization properties
+            safeSend(m_indiP_targetLatency);
+            safeSend(m_indiP_autoOptimizeLatency);
+            safeSend(m_indiP_runOptimization);
+            safeSend(m_indiP_optimizationStatus);
+            safeSend(m_indiP_results);
+            
+            // DM metadata properties
+            safeSend(m_indiP_numActuators);
+            safeSend(m_indiP_gridWidth);
+            safeSend(m_indiP_gridHeight);
+            safeSend(m_indiP_dmType);
+            safeSend(m_indiP_deadActuators);
+            safeSend(m_indiP_couplingMatrix);
+            safeSend(m_indiP_actuatorGains);
+            safeSend(m_indiP_actuatorLimits);
+            
+            m_indiPropertiesSent = true;
+            log<text_log>("eyeDoctor::appLogic() - All properties sent to INDI server");
+        }
+        // If sendNewProperty returns < 0, INDI not ready yet, will try again next iteration
+    }
 
     return 0;
 }
@@ -828,7 +1147,6 @@ int eyeDoctor::appShutdown()
         }
     }
     
-    DMWAVEFRONTCONTROL_APP_SHUTDOWN;
     return 0;
 }
 
@@ -941,18 +1259,29 @@ int eyeDoctor::runOptimizationAlgorithm()
             // Calculate search bounds
             std::pair<double, double> bounds = {-m_searchRange/2.0, m_searchRange/2.0};
             
-            // Run grid sweep optimization for this mode
-            double optimalValue = gridSweepOptimization(
-                modeIdx - 1,  // Convert to 0-based index for dmWavefrontControl
+            // TODO: Implement grid sweep optimization with image collection callback
+            // The helper class needs a callback function to collect images
+            /*
+            auto imageCollector = [this](double amplitude) -> std::vector<eigenImage<float>> {
+                // TODO: Apply mode amplitude to DM via shmim
+                // TODO: Collect m_nImages from WFS camera via shmim
+                // Return collected images
+                return std::vector<eigenImage<float>>();
+            };
+            
+            double optimalValue = m_wfsHelper.gridSweepOptimization(
                 bounds,
                 m_nSteps,
                 m_nRepeats,
-                m_nImages,
-                "coreSum",  // Metric type
-                {{"radius", m_psfCoreRadiusPixels}, {"cenX", m_cenX}, {"cenY", m_cenY}}
+                imageCollector,
+                "coreSum",
+                {{"radius", m_psfCoreRadiusPixels}, {"cenX", m_cenX}, {"cenY", m_cenY}},
+                "fit"
             );
+            */
             
-            log<text_log>("Mode " + std::to_string(modeIdx) + " optimized to: " + std::to_string(optimalValue));
+            double optimalValue = 0.0; // Placeholder
+            log<text_log>("Mode " + std::to_string(modeIdx) + " optimization skipped (not yet implemented)");
             
             // Small delay between modes
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1046,75 +1375,127 @@ int eyeDoctor::recordEyeDoctor(bool force)
 
 // Callback definitions for dmWavefrontControl properties
 
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmPokeAmplitude)(const pcf::IndiProperty &ipRecv)
+// Old base class callbacks removed - these properties no longer exist
+
+// ========== DM CONTROL MODE CALLBACKS ==========
+
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmControlMode)(const pcf::IndiProperty &ipRecv)
 {
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmPokeAmplitude, ipRecv)
-   
-    float target;
-    if(indiTargetUpdate(m_indiP_dmPokeAmplitude, target, ipRecv, false) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__});
-    }
-
-    // Update the dmWavefrontControl property
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmPokeDelay)(const pcf::IndiProperty &ipRecv)
-{
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmPokeDelay, ipRecv)
-   
-    float target;
-    if(indiTargetUpdate(m_indiP_dmPokeDelay, target, ipRecv, false) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__});
-    }
-
-    // Update the dmWavefrontControl property
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_wfsCamera)(const pcf::IndiProperty &ipRecv)
-{
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_wfsCamera, ipRecv)
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmControlMode, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_wfsCamera, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_dmControlMode, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
-    // Update the dmWavefrontControl property
+    // Validate mode
+    if (target != "magaox" && target != "cacao") {
+        log<text_log>("Invalid dmControlMode: " + target + " (must be 'magaox' or 'cacao')", logPrio::LOG_ERROR);
+        return -1;
+    }
+    
+    m_dmControlMode = target;
+    log<text_log>("DM control mode changed to: " + m_dmControlMode, logPrio::LOG_INFO);
+    
+    // Update current value
+    updateIfChanged(m_indiP_dmControlMode, "current", m_dmControlMode);
+    
+    // Re-resolve internal DM names based on new mode
+    if (m_dmControlMode == "magaox") {
+        if (m_dmDeviceMap.find(m_selectedDMApp) != m_dmDeviceMap.end()) {
+            m_dmShmimName = m_dmDeviceMap[m_selectedDMApp].shmimName;
+        }
+    } else {
+        m_dmShmimName = m_selectedDMShmim;
+    }
+    
+    updateDMConfiguration();
+    
     return 0;
 }
 
-INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_psfCoreRadius)(const pcf::IndiProperty &ipRecv)
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedDMApp)(const pcf::IndiProperty &ipRecv)
 {
-    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_psfCoreRadius, ipRecv)
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedDMApp, ipRecv)
    
-    float target;
-    if(indiTargetUpdate(m_indiP_psfCoreRadius, target, ipRecv, false) < 0)
+    std::string target;
+    if(indiTargetUpdate(m_indiP_selectedDMApp, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
-    // Update the dmWavefrontControl property
+    m_selectedDMApp = target;
+    log<text_log>("Selected MagAOX DM app: " + m_selectedDMApp, logPrio::LOG_INFO);
+    
+    // Update current value
+    updateIfChanged(m_indiP_selectedDMApp, "current", m_selectedDMApp);
+    
+    // Only resolve internal names if in magaox mode
+    if (m_dmControlMode == "magaox") {
+        if (m_dmDeviceMap.find(target) != m_dmDeviceMap.end()) {
+            m_dmShmimName = m_dmDeviceMap[target].shmimName;
+        }
+        updateDMConfiguration();
+    }
+    
     return 0;
 }
 
-// Callback definitions for eyeDoctor-specific properties
+INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedDMShmim)(const pcf::IndiProperty &ipRecv)
+{
+    INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedDMShmim, ipRecv)
+   
+    std::string target;
+    if(indiTargetUpdate(m_indiP_selectedDMShmim, target, ipRecv, true) < 0)
+    {
+        return log<software_error,-1>({__FILE__, __LINE__});
+    }
+
+    m_selectedDMShmim = target;
+    log<text_log>("Selected CACAO DM shmim: " + m_selectedDMShmim, logPrio::LOG_INFO);
+    
+    // Update current value
+    updateIfChanged(m_indiP_selectedDMShmim, "current", m_selectedDMShmim);
+    
+    // Only resolve internal names if in cacao mode
+    if (m_dmControlMode == "cacao") {
+        updateDMConfiguration();
+    }
+    
+    return 0;
+}
+
+// ========== LEGACY CALLBACK (BACKWARD COMPATIBILITY) ==========
+
 INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedDM)(const pcf::IndiProperty &ipRecv)
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedDM, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_selectedDM, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_selectedDM, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
-    // Update the selected DM and reconfigure
-    m_selectedDM = target;
+    // Update the selected DM based on control mode
+    if (m_dmControlMode == "magaox") {
+        m_selectedDMApp = target;
+        // Resolve shmim name from app mapping
+        if (m_dmDeviceMap.find(target) != m_dmDeviceMap.end()) {
+            m_dmShmimName = m_dmDeviceMap[target].shmimName;
+        }
+        // Update the selectedDMApp property current value
+        updateIfChanged(m_indiP_selectedDMApp, "current", m_selectedDMApp);
+    } else if (m_dmControlMode == "cacao") {
+        m_selectedDMShmim = target;
+        // Update the selectedDMShmim property current value
+        updateIfChanged(m_indiP_selectedDMShmim, "current", m_selectedDMShmim);
+    }
+    
+    // Update legacy property current value
+    updateIfChanged(m_indiP_selectedDM, "current", target);
+    
     updateDMConfiguration();
     
     return 0;
@@ -1125,13 +1506,17 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_selectedCamera)(const pcf::IndiProperty
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_selectedCamera, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_selectedCamera, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_selectedCamera, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
     // Update the selected camera and reconfigure
     m_selectedCamera = target;
+    
+    // Update current value
+    updateIfChanged(m_indiP_selectedCamera, "current", m_selectedCamera);
+    
     updateCameraConfiguration();
     
     return 0;
@@ -1151,6 +1536,8 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_startModeIndex)(const pcf::IndiProperty
     m_startModeIndex = target;
     m_totalModes = m_endModeIndex - m_startModeIndex + 1;
     
+    updateIfChanged(m_indiP_startModeIndex, "current", m_startModeIndex);
+    
     return 0;
 }
 
@@ -1167,6 +1554,8 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_endModeIndex)(const pcf::IndiProperty &
     // Update the end mode index and recalculate total modes
     m_endModeIndex = target;
     m_totalModes = m_endModeIndex - m_startModeIndex + 1;
+    
+    updateIfChanged(m_indiP_endModeIndex, "current", m_endModeIndex);
     
     return 0;
 }
@@ -1201,6 +1590,8 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nSteps)(const pcf::IndiProperty &ipRecv
     // Update the number of steps
     m_nSteps = target;
     
+    updateIfChanged(m_indiP_nSteps, "current", m_nSteps);
+    
     return 0;
 }
 
@@ -1216,6 +1607,8 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nRepeats)(const pcf::IndiProperty &ipRe
 
     // Update the number of repeats
     m_nRepeats = target;
+    
+    updateIfChanged(m_indiP_nRepeats, "current", m_nRepeats);
     
     return 0;
 }
@@ -1233,6 +1626,8 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nImages)(const pcf::IndiProperty &ipRec
     // Update the number of images
     m_nImages = target;
     
+    updateIfChanged(m_indiP_nImages, "current", m_nImages);
+    
     return 0;
 }
 
@@ -1247,6 +1642,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nClusterRepeats)(const pcf::IndiPropert
     }
 
     m_nClusterRepeats = target;
+    
+    updateIfChanged(m_indiP_nClusterRepeats, "current", m_nClusterRepeats);
+    
     return 0;
 }
 
@@ -1261,6 +1659,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_nSeqRepeat)(const pcf::IndiProperty &ip
     }
 
     m_nSeqRepeat = target;
+    
+    updateIfChanged(m_indiP_nSeqRepeat, "current", m_nSeqRepeat);
+    
     return 0;
 }
 
@@ -1275,6 +1676,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_cenX)(const pcf::IndiProperty &ipRecv)
     }
 
     m_cenX = target;
+    
+    updateIfChanged(m_indiP_cenX, "current", m_cenX);
+    
     return 0;
 }
 
@@ -1289,6 +1693,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_cenY)(const pcf::IndiProperty &ipRecv)
     }
 
     m_cenY = target;
+    
+    updateIfChanged(m_indiP_cenY, "current", m_cenY);
+    
     return 0;
 }
 
@@ -1303,6 +1710,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_skipFrames)(const pcf::IndiProperty &ip
     }
 
     m_skipFrames = target;
+    
+    updateIfChanged(m_indiP_skipFrames, "current", m_skipFrames);
+    
     return 0;
 }
 
@@ -1336,18 +1746,18 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_ignoreFocus)(const pcf::IndiProperty &i
     return 0;
 }
 
-// searchRange callback: Base class registers the property, derived class implements the handler
+// searchRange callback
 INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_searchRange)(const pcf::IndiProperty &ipRecv)
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_searchRange, ipRecv)
    
     float target;
-    if(indiTargetUpdate(m_indiP_searchRange, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_searchRange, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
    
-    m_searchRange = target;  // Base class member variable
+    m_searchRange = target;
     updateIfChanged(m_indiP_searchRange, "current", m_searchRange);
    
     return 0;
@@ -1371,13 +1781,9 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_autoOptimizeLatency)(const pcf::IndiPro
 {
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_autoOptimizeLatency, ipRecv)
    
-    bool target;
-    if(indiTargetUpdate(m_indiP_autoOptimizeLatency, target, ipRecv, false) < 0)
-    {
-        return log<software_error,-1>({__FILE__, __LINE__});
-    }
-
-    // Update the dmWavefrontControl property
+    m_autoOptimizeLatency = (ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On);
+    updateSwitchIfChanged(m_indiP_autoOptimizeLatency, "toggle", m_autoOptimizeLatency ? pcf::IndiElement::On : pcf::IndiElement::Off);
+    
     return 0;
 }
 
@@ -1478,12 +1884,13 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_dmType)(const pcf::IndiProperty &ipRecv
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_dmType, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_dmType, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_dmType, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
     m_dmType = target;
+    updateIfChanged(m_indiP_dmType, "current", m_dmType);
     return 0;
 }
 
@@ -1492,7 +1899,7 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_deadActuators)(const pcf::IndiProperty 
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_deadActuators, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_deadActuators, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_deadActuators, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
@@ -1513,6 +1920,14 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_deadActuators)(const pcf::IndiProperty 
         }
     }
     
+    // Reconstruct the string to update current value
+    std::string deadActuatorsStr = "";
+    for(size_t i = 0; i < m_deadActuators.size(); ++i) {
+        if(i > 0) deadActuatorsStr += ",";
+        deadActuatorsStr += std::to_string(m_deadActuators[i]);
+    }
+    updateIfChanged(m_indiP_deadActuators, "current", deadActuatorsStr);
+    
     return 0;
 }
 
@@ -1521,12 +1936,13 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_couplingMatrix)(const pcf::IndiProperty
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_couplingMatrix, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_couplingMatrix, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_couplingMatrix, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
     m_couplingMatrix = target;
+    updateIfChanged(m_indiP_couplingMatrix, "current", m_couplingMatrix);
     return 0;
 }
 
@@ -1535,12 +1951,13 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_actuatorGains)(const pcf::IndiProperty 
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_actuatorGains, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_actuatorGains, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_actuatorGains, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
     m_actuatorGains = target;
+    updateIfChanged(m_indiP_actuatorGains, "current", m_actuatorGains);
     return 0;
 }
 
@@ -1549,12 +1966,13 @@ INDI_NEWCALLBACK_DEFN(eyeDoctor, m_indiP_actuatorLimits)(const pcf::IndiProperty
     INDI_VALIDATE_CALLBACK_PROPS(m_indiP_actuatorLimits, ipRecv)
    
     std::string target;
-    if(indiTargetUpdate(m_indiP_actuatorLimits, target, ipRecv, false) < 0)
+    if(indiTargetUpdate(m_indiP_actuatorLimits, target, ipRecv, true) < 0)
     {
         return log<software_error,-1>({__FILE__, __LINE__});
     }
 
     m_actuatorLimits = target;
+    updateIfChanged(m_indiP_actuatorLimits, "current", m_actuatorLimits);
     return 0;
 }
 

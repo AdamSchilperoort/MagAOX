@@ -1,0 +1,85 @@
+# eyeDoctor Configuration File
+# Location: /opt/MagAOX/config/eyeDoc.conf
+
+[eyedoctor]
+# Available DM Devices
+availableDMs = wooferModes,ncpcModes,tweeterModes,kiloModes
+
+# Selected DM Device
+selectedDM = kiloModes
+
+# Available Wavefront Sensing Cameras
+availableCameras = camsci1,camsci2,camlowfs,camtip,camflowf
+
+# Selected Camera for Wavefront Sensing
+selectedCamera = camlo_sim
+
+# Mode Range Specification
+startModeIndex = 2
+endModeIndex = 10
+
+# Algorithm Parameters
+psfCoreRadiusPixels = 5.0
+searchRange = 0.1
+nSteps = 20
+nRepeats = 3
+nClusterRepeats = 1
+nSeqRepeat = 1
+nImages = 1
+cenX = 17
+cenY = 17
+skipFrames = 0
+resetToZero = false
+ignoreFocus = true
+
+# Optimization Parameters
+targetLatency = 1000.0
+latencyTolerance = 100.0
+autoOptimizeLatency = true
+maxIterations = 100
+convergenceThreshold = 1e-6
+adaptiveStepSize = 0.1
+
+[dmWavefrontControl]
+# Amplitude of DM pokes (volts or microns)
+dmPokeAmplitude = 0.1
+
+# Delay between DM commands in microseconds (CACAO mlat parameter)
+dmPokeDelay = 10000
+
+# DM metadata file (leave empty to use config parameters below instead)
+metadata_file = 
+
+# DM device/shared memory name (CACAO shmim name, full channel name)
+deviceName = dm00disp06
+
+# WFS camera configuration
+wfsShmimName = camlo_sim
+wfsDarkShmimName =
+wfsCameraName = camlo_sim
+
+# DM Physical Parameters
+actuator_spacing = 0.4
+max_stroke = 5.0
+numActuators = 1156
+gridWidth = 34
+gridHeight = 34
+dmType = Boston Micromachines
+deadActuators =
+
+# Optional file paths (leave empty if not used)
+couplingMatrix =
+actuatorGains =
+actuatorLimits =
+
+# Modeset Configuration (REQUIRED)
+# Path must be absolute and point to the FITS file you generated
+modesets = /opt/MagAOX/calib/dm/kilo/zernike_modes_kilo_34x34_36modes.fits
+modeset_names = zernike
+default_modeset = zernike
+modes_to_optimize =
+
+[telemeter]
+# Telemetry configuration
+telemetryEnabled = true
+
