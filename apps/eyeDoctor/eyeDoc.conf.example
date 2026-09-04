@@ -1,85 +1,41 @@
-# eyeDoctor Configuration File
-# Location: /opt/MagAOX/config/eyeDoc.conf
+# Eye Doctor MagAO-X application
+#
+# Install as /opt/MagAOX/config/eyeDoctor.conf (or eyeDoc.conf if that is the
+# process configName).
+
+[shmims]
+shm_dm_eyeDoc = dm01disp06
+shm_dm_eyeDoc_sweep = dm01disp05
+shm_dm_flat = dm01disp00
+shm_dm_sum = dm01disp
+shm_cam = camsci
+
+[camera]
+cam_name = camsci
 
 [eyedoctor]
-# Available DM Devices
-availableDMs = wooferModes,ncpcModes,tweeterModes,kiloModes
-
-# Selected DM Device
-selectedDM = kiloModes
-
-# Available Wavefront Sensing Cameras
-availableCameras = camsci1,camsci2,camlowfs,camtip,camflowf
-
-# Selected Camera for Wavefront Sensing
-selectedCamera = camlo_sim
-
-# Mode Range Specification
-startModeIndex = 2
-endModeIndex = 10
-
-# Algorithm Parameters
-psfCoreRadiusPixels = 5.0
-searchRange = 0.1
-nSteps = 20
-nRepeats = 3
-nClusterRepeats = 1
-nSeqRepeat = 1
-nImages = 1
-cenX = 17
-cenY = 17
-skipFrames = 0
-resetToZero = false
-ignoreFocus = true
-
-# Optimization Parameters
-targetLatency = 1000.0
-latencyTolerance = 100.0
-autoOptimizeLatency = true
-maxIterations = 100
-convergenceThreshold = 1e-6
-adaptiveStepSize = 0.1
-
-[dmWavefrontControl]
-# Amplitude of DM pokes (volts or microns)
-dmPokeAmplitude = 0.1
-
-# Delay between DM commands in microseconds (CACAO mlat parameter)
-dmPokeDelay = 10000
-
-# DM metadata file (leave empty to use config parameters below instead)
-metadata_file = 
-
-# DM device/shared memory name (CACAO shmim name, full channel name)
-deviceName = dm00disp06
-
-# WFS camera configuration
-wfsShmimName = camlo_sim
-wfsDarkShmimName =
-wfsCameraName = camlo_sim
-
-# DM Physical Parameters
-actuator_spacing = 0.4
-max_stroke = 5.0
-numActuators = 1156
-gridWidth = 34
-gridHeight = 34
-dmType = Boston Micromachines
-deadActuators =
-
-# Optional file paths (leave empty if not used)
-couplingMatrix =
-actuatorGains =
-actuatorLimits =
-
-# Modeset Configuration (REQUIRED)
-# Path must be absolute and point to the FITS file you generated
-modesets = /opt/MagAOX/calib/dm/kilo/zernike_modes_kilo_34x34_36modes.fits
-modeset_names = zernike
-default_modeset = zernike
-modes_to_optimize =
-
-[telemeter]
-# Telemetry configuration
-telemetryEnabled = true
-
+mode_type = zernike
+n_modes = 36
+flat_dir = /opt/MagAOX/calib/dm/bmc_1k/flats
+# dark_lib_path = /opt/MagAOX/data/darks/camsci
+exptime_tol = 0.0001
+mode_start = 0
+mode_end = 10
+focus_mode_index = 3
+core_radius = 10.0
+search_range = 0.1
+search_step = 0
+n_steps = 20
+n_repeats = 3
+n_seq_repeat = 1
+n_images = 10
+skip_frames = 200
+cen_x = 255
+cen_y = 255
+sat_thresh = 55000
+blank_thresh = 0
+dm_delay = 0.1
+search_kind = fit
+reset_to_zero = false
+# Pulse INDI reset_to_zero to write zeros to both eye-doctor DM channels.
+ignore_focus = false
