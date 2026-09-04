@@ -64,6 +64,9 @@ apps/dmPokeCenter/dmPokeCenter
 apps/dmPokeXCorr/dmPokeXCorr
 apps/dmSpeckle/dmSpeckle
 
+#e
+apps/eyeDoctor/eyeDoctor
+
 #f
 apps/filterWheelCtrl/filterWheelCtrl
 apps/flipperCtrl/flipperCtrl
