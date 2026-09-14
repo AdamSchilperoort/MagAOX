@@ -1225,17 +1225,18 @@ class wavefrontHardware
         return 0;
     }
 
+    int connectCamera()
+    {
+        return cam.open( camName );
+    }
+
     int connectLoop()
     {
         if( connectAlgoChannels() < 0 )
         {
             return -1;
         }
-        if( cam.open( camName ) < 0 )
-        {
-            return -1;
-        }
-        return 0;
+        return connectCamera();
     }
 
     int connectFlatSave()
@@ -1245,14 +1246,6 @@ class wavefrontHardware
             return -1;
         }
         if( dmFlat.open( dmFlatName ) < 0 )
-        {
-            return -1;
-        }
-        if( !dmEyeDoc.isOpen() && dmEyeDoc.open( dmEyeDocName ) < 0 )
-        {
-            return -1;
-        }
-        if( !singleChannel() && !dmSweep.isOpen() && dmSweep.open( dmSweepName ) < 0 )
         {
             return -1;
         }

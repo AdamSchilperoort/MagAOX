@@ -1,12 +1,11 @@
 /** \file eyeDoctor.hpp
   * \brief MagAO-X Eye Doctor: modal DM grid-search to maximize PSF core flux.
   *
-  * C++ port of magpyx/scoobpy eye_doctor. Modes are generated in-process
-  * (Noll Zernike via mxlib, Sylvester Hadamard on a circular actuator mask)
-  * or optionally loaded from a FITS cube. Grid-search pokes go on a temporary
-  * cacao channel; the winning command accumulates on an empty eye-doctor
-  * channel. save_flat copies the summed DM command onto the flat channel,
-  * zeros the eye-doctor channels, and writes a FITS file.
+  * C++ port of magpyx `eye_doctor_comprehensive`. Commands a remote INDI
+  * modeset device (typically a `dmMode` instance such as `alpaoModes`) via
+  * `target_amps` / `current_amps`. That app owns the modeset, converts
+  * amplitudes to a DM shape, and writes the cacao channel. This app only
+  * sends mode amplitudes and measures PSF core flux on a camera shmim.
   *
   * \ingroup eyeDoctor_files
   */
@@ -14,19 +13,26 @@
 #ifndef eyeDoctor_hpp
 #define eyeDoctor_hpp
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 #include <mx/improc/eigenImage.hpp>
 #include <mx/sys/timeUtils.hpp>
@@ -52,15 +58,16 @@ namespace app
 {
 
 /// MagAO-X Eye Doctor application
-/** INDI front-end for the eye_doctor grid-sweep algorithm.
+/** INDI front-end for magpyx `eye_doctor_comprehensive`.
   *
   * Hardware:
-  *  - \c shm_dm_eyeDoc       : accumulated modal command (start empty)
-  *  - \c shm_dm_eyeDoc_sweep : temporary grid-search pokes
-  *  - \c shm_dm_flat         : cacao flat (typically disp00)
-  *  - \c shm_dm_sum          : cacao total (dmXXdisp)
-  *  - \c shm_cam             : WFS / science-camera image shmim
-  *  - \c cam_name            : INDI device of that camera
+  *  - \c modes_device : INDI dmMode app (`alpaoModes`, `wooferModes`, ...)
+  *  - \c shm_cam      : WFS / science-camera image shmim
+  *  - \c cam_name     : INDI device of that camera
+  *  - \c shm_dm_flat / \c shm_dm_sum : optional, used only by save_flat
+  *
+  * Equivalent CLI:
+  * `dm_eye_doctor <port> alpaoModes camsci 8 2...10 0.1 --skip 1`
   *
   * \ingroup eyeDoctor
   */
@@ -75,8 +82,7 @@ class eyeDoctor : public MagAOXApp<true>
     /** \name Hardware names
       *@{
       */
-    std::string m_shmDmEyeDoc{ "dm01disp07" };
-    std::string m_shmDmSweep{ "dm01disp06" };
+    std::string m_modesDevice{ "alpaoModes" }; ///< INDI dmMode device (target_amps / current_amps)
     std::string m_shmDmFlat{ "dm01disp00" };
     std::string m_shmDmSum{ "dm01disp" };
     std::string m_shmCam{ "camsci" };
@@ -86,37 +92,35 @@ class eyeDoctor : public MagAOXApp<true>
     std::string m_darkLibPath; ///< darkCtrl library (dark_metadata.txt + dark_NNN.fits)
     ///@}
 
-    /** \name Modes
+    /** \name Algorithm parameters (magpyx eye_doctor_comprehensive / dm_eye_doctor)
       *@{
       */
-    std::string m_modeType{ "zernike" }; ///< zernike | hadamard | fits
-    int m_nModes{ 36 };                  ///< Zernike planes to generate (Noll j=1 .. n)
-    std::string m_modesetPath;           ///< Used only when mode_type=fits
-    ///@}
-
-    /** \name Algorithm parameters (Python eye_doctor / console_comprehensive)
-      *@{
-      */
-    int m_modeStart{ 0 };
+    std::string m_modesSpec; ///< Optional magpyx list, e.g. "2...10,12". Empty = mode_start..mode_end.
+    int m_modeStart{ 2 };
     int m_modeEnd{ 10 };
-    int m_focusModeIndex{ 3 }; ///< 0-based Noll focus (Z4) when piston is index 0
-    double m_coreRadius{ 10.0 };
-    double m_searchRange{ 0.1 }; ///< Total span; sweep is [-range/2, +range/2]
+    int m_focusModeIndex{ 2 }; ///< magpyx focus-first mode (default 2)
+    double m_coreRadius{ 8.0 };
+    double m_searchRange{ 0.1 }; ///< Total span; sweep is [-range/2, +range/2] about baseline
     double m_searchStep{ 0.0 };  ///< Amplitude spacing; 0 = use n_steps
     int m_nSteps{ 20 };
     int m_nRepeats{ 3 };
+    int m_nCluster{ 5 };
+    int m_nClusterRepeat{ 1 };
     int m_nSeqRepeat{ 1 };
     int m_nImages{ 1 };
-    int m_skipFrames{ 0 };
+    int m_skipFrames{ 1 };
     double m_cenX{ -1.0 }; ///< <0 = auto centroid
     double m_cenY{ -1.0 };
     double m_satThresh{ 55000.0 }; ///< Warn if camera peak >= this (0 = off)
     double m_blankThresh{ 0.0 };   ///< Peak ADU treated as off-camera. 0 = 10% of sweep max.
     double m_exptimeTol{ 1e-4 };    ///< |live exptime - library exptime| allowed [s]
-    double m_dmDelay{ 0.1 }; ///< Seconds after each DM write
+    double m_dmDelay{ 0.1 }; ///< Extra settle after the modes device reports current==target [s]
+    double m_ampTol{ 1e-3 }; ///< |current_amps - target| wait tolerance
+    double m_ampTimeout{ 10.0 }; ///< Seconds to wait for current_amps
     std::string m_searchKind{ "fit" };
-    bool m_resetToZero{ false };
-    bool m_ignoreFocus{ false };
+    bool m_baseline{ true }; ///< Center each sweep on the live current_amps value
+    bool m_randomize{ true }; ///< Shuffle modes inside each cluster
+    bool m_ignoreFocus{ false }; ///< Skip the extra focus-first pass
     ///@}
 
     /** \name Live camera SET
@@ -157,19 +161,18 @@ class eyeDoctor : public MagAOXApp<true>
     double m_lastAmp{ 0 };
     double m_lastMetric{ 0 };
     int m_satWarnedMode{ -2 };
-    int m_nanWarnedMode{ -2 };
     ///@}
 
+    std::mutex m_modesMutex;
+    std::vector<double> m_remoteAmps; ///< latest current_amps from modes_device
+
     dev::wavefrontHardware m_hw;
-    dev::modeCube m_modes;
 
     /** \name INDI
       *@{
       */
-    pcf::IndiProperty m_indiP_shmDmEyeDoc;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_shmDmEyeDoc );
-    pcf::IndiProperty m_indiP_shmDmSweep;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_shmDmSweep );
+    pcf::IndiProperty m_indiP_modesDevice;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modesDevice );
     pcf::IndiProperty m_indiP_shmDmFlat;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_shmDmFlat );
     pcf::IndiProperty m_indiP_shmDmSum;
@@ -183,13 +186,8 @@ class eyeDoctor : public MagAOXApp<true>
     pcf::IndiProperty m_indiP_darkLibPath;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_darkLibPath );
 
-    pcf::IndiProperty m_indiP_modeType;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modeType );
-    pcf::IndiProperty m_indiP_nModes;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nModes );
-    pcf::IndiProperty m_indiP_modeset;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modeset );
-
+    pcf::IndiProperty m_indiP_modesSpec;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modesSpec );
     pcf::IndiProperty m_indiP_modeStart;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modeStart );
     pcf::IndiProperty m_indiP_modeEnd;
@@ -206,6 +204,10 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nSteps );
     pcf::IndiProperty m_indiP_nRepeats;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nRepeats );
+    pcf::IndiProperty m_indiP_nCluster;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nCluster );
+    pcf::IndiProperty m_indiP_nClusterRepeat;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nClusterRepeat );
     pcf::IndiProperty m_indiP_nSeqRepeat;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_nSeqRepeat );
     pcf::IndiProperty m_indiP_nImages;
@@ -224,8 +226,16 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_exptimeTol );
     pcf::IndiProperty m_indiP_dmDelay;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_dmDelay );
+    pcf::IndiProperty m_indiP_ampTol;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_ampTol );
+    pcf::IndiProperty m_indiP_ampTimeout;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_ampTimeout );
     pcf::IndiProperty m_indiP_searchKind;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_searchKind );
+    pcf::IndiProperty m_indiP_baseline;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_baseline );
+    pcf::IndiProperty m_indiP_randomize;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_randomize );
     pcf::IndiProperty m_indiP_resetToZero;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_resetToZero );
     pcf::IndiProperty m_indiP_ignoreFocus;
@@ -256,6 +266,8 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteEmgain );
     pcf::IndiProperty m_indiP_remoteBlacklevel;
     INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteBlacklevel );
+    pcf::IndiProperty m_indiP_remoteAmps;
+    INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteAmps );
     ///@}
 
   public:
@@ -271,10 +283,22 @@ class eyeDoctor : public MagAOXApp<true>
     static void workerStart( eyeDoctor *e );
     void workerExec();
     int runOptimization();
+    int optimizeMode( int mi, mx::improc::eigenImage<float> &camIm );
     int saveFlat();
     int abortAndZero();
     int resetToZero();
-    int zeroAlgoChannels();
+    int zeroAllModes();
+    int sendModeAmp( int mode, double amp );
+    int waitModeAmp( int mode, double amp );
+    int sendModeAndWait( int mode, double amp );
+    int nRemoteModes();
+    double currentAmp( int mode );
+    int waitForModesDevice();
+    std::vector<int> requestedModes() const;
+    std::vector<int> allowedModes( const std::vector<int> &req, int nAvail, bool *truncated ) const;
+    std::vector<int> buildSequence( const std::vector<int> &modes ) const;
+    static std::string modeElementName( int mode );
+    static std::vector<int> parseModeSpec( const std::string &spec, int start, int end );
     int reloadDarkLib();
     int refreshDark( bool required );
     lina::DarkMatchFilter darkFilter() const;
@@ -282,10 +306,8 @@ class eyeDoctor : public MagAOXApp<true>
     std::string pickDark( double target_exptime, const lina::DarkMatchFilter &filter,
                            lina::DarkLibraryEntry *matched, double *match_err );
     void applyDark( mx::improc::eigenImage<float> &im );
-    int prepareModes( int size0, int size1 );
     int measureMetric( mx::improc::eigenImage<float> &im, double &metric );
     void warnIfSaturated( const mx::improc::eigenImage<float> &im );
-    void warnIfDmNonFinite( const std::string &channel, int nbad );
     void setStatus( const std::string &s );
     void setRunToggle( bool on, pcf::IndiProperty::PropertyStateType st );
     void clearRequest( pcf::IndiProperty &p );
@@ -301,15 +323,13 @@ eyeDoctor::eyeDoctor() : MagAOXApp( MAGAOX_CURRENT_SHA1, MAGAOX_REPO_MODIFIED )
 
 void eyeDoctor::setupConfig()
 {
-    config.add( "shmims.shm_dm_eyeDoc", "", "shmims.shm_dm_eyeDoc", argType::Required, "shmims", "shm_dm_eyeDoc", false,
-                "string", "Accumulated eye-doctor command channel (start empty)." );
-    config.add( "shmims.shm_dm_eyeDoc_sweep", "", "shmims.shm_dm_eyeDoc_sweep", argType::Required, "shmims",
-                "shm_dm_eyeDoc_sweep", false, "string",
-                "Temporary grid-search poke channel. Set equal to shm_dm_eyeDoc for single-channel." );
+    config.add( "eyedoctor.modes_device", "", "eyedoctor.modes_device", argType::Required, "eyedoctor",
+                "modes_device", false, "string",
+                "INDI dmMode device that owns the modeset (e.g. alpaoModes)." );
     config.add( "shmims.shm_dm_flat", "", "shmims.shm_dm_flat", argType::Required, "shmims", "shm_dm_flat", false,
-                "string", "cacao flat channel (typically dmXXdisp00)." );
+                "string", "cacao flat channel (typically dmXXdisp00). Used by save_flat." );
     config.add( "shmims.shm_dm_sum", "", "shmims.shm_dm_sum", argType::Required, "shmims", "shm_dm_sum", false, "string",
-                "cacao summed / total DM command (dmXXdisp)." );
+                "cacao summed / total DM command (dmXXdisp). Used by save_flat." );
     config.add( "shmims.shm_cam", "", "shmims.shm_cam", argType::Required, "shmims", "shm_cam", false, "string",
                 "WFS / science camera image shmim." );
     config.add( "camera.cam_name", "", "camera.cam_name", argType::Required, "camera", "cam_name", false, "string",
@@ -321,34 +341,35 @@ void eyeDoctor::setupConfig()
                 "darkCtrl library directory (dark_metadata.txt + dark_NNN.fits)." );
     config.add( "eyedoctor.exptime_tol", "", "eyedoctor.exptime_tol", argType::Required, "eyedoctor", "exptime_tol",
                 false, "float", "Max |live-library| exptime difference [s] when picking a dark." );
-    config.add( "eyedoctor.mode_type", "", "eyedoctor.mode_type", argType::Required, "eyedoctor", "mode_type", false,
-                "string", "zernike, hadamard, or fits." );
-    config.add( "eyedoctor.n_modes", "", "eyedoctor.n_modes", argType::Required, "eyedoctor", "n_modes", false, "int",
-                "Number of Zernike modes to generate (Noll j=1 is plane 0). Ignored for hadamard." );
-    config.add( "eyedoctor.modeset", "", "eyedoctor.modeset", argType::Required, "eyedoctor", "modeset", false,
-                "string", "Optional FITS cube when mode_type=fits." );
+    config.add( "eyedoctor.modes", "", "eyedoctor.modes", argType::Required, "eyedoctor", "modes", false, "string",
+                "Optional magpyx mode list (e.g. 2...10,12). Empty uses mode_start..mode_end." );
     config.add( "eyedoctor.mode_start", "", "eyedoctor.mode_start", argType::Required, "eyedoctor", "mode_start", false,
-                "int", "First 0-based mode index to optimize." );
+                "int", "First 0-based mode index when modes is empty." );
     config.add( "eyedoctor.mode_end", "", "eyedoctor.mode_end", argType::Required, "eyedoctor", "mode_end", false, "int",
-                "Last 0-based mode index to optimize (inclusive)." );
+                "Last 0-based mode index when modes is empty (inclusive)." );
     config.add( "eyedoctor.focus_mode_index", "", "eyedoctor.focus_mode_index", argType::Required, "eyedoctor",
-                "focus_mode_index", false, "int", "0-based focus mode skipped when ignore_focus is on (default 3)." );
+                "focus_mode_index", false, "int",
+                "Mode optimized first unless ignore_focus (magpyx default 2)." );
     config.add( "eyedoctor.core_radius", "", "eyedoctor.core_radius", argType::Required, "eyedoctor", "core_radius",
                 false, "float", "PSF core radius [pixels] for coresum metric." );
     config.add( "eyedoctor.search_range", "", "eyedoctor.search_range", argType::Required, "eyedoctor", "search_range",
-                false, "float", "Total amplitude span; sweep is +/- range/2." );
+                false, "float", "Total amplitude span; sweep is +/- range/2 about baseline." );
     config.add( "eyedoctor.search_step", "", "eyedoctor.search_step", argType::Required, "eyedoctor", "search_step",
                 false, "float", "Amplitude step size. If >0, n_steps is derived as range/step + 1." );
     config.add( "eyedoctor.n_steps", "", "eyedoctor.n_steps", argType::Required, "eyedoctor", "n_steps", false, "int",
                 "Grid samples per sweep." );
     config.add( "eyedoctor.n_repeats", "", "eyedoctor.n_repeats", argType::Required, "eyedoctor", "n_repeats", false,
                 "int", "Number of sweep repeats averaged / jointly fit." );
+    config.add( "eyedoctor.n_cluster", "", "eyedoctor.n_cluster", argType::Required, "eyedoctor", "n_cluster", false,
+                "int", "Modes per shuffled cluster (magpyx ncluster, default 5)." );
+    config.add( "eyedoctor.n_cluster_repeat", "", "eyedoctor.n_cluster_repeat", argType::Required, "eyedoctor",
+                "n_cluster_repeat", false, "int", "Times to repeat each cluster (magpyx --nclusterrepeats)." );
     config.add( "eyedoctor.n_seq_repeat", "", "eyedoctor.n_seq_repeat", argType::Required, "eyedoctor", "n_seq_repeat",
                 false, "int", "Repeat the full mode sequence this many times." );
     config.add( "eyedoctor.n_images", "", "eyedoctor.n_images", argType::Required, "eyedoctor", "n_images", false,
                 "int", "Camera frames averaged per metric sample." );
     config.add( "eyedoctor.skip_frames", "", "eyedoctor.skip_frames", argType::Required, "eyedoctor", "skip_frames",
-                false, "int", "Camera frames to discard after each DM write." );
+                false, "int", "Camera frames to discard after each mode command." );
     config.add( "eyedoctor.cen_x", "", "eyedoctor.cen_x", argType::Required, "eyedoctor", "cen_x", false, "float",
                 "PSF x pixel in the camera image (size[0], 0-based). <0 = auto." );
     config.add( "eyedoctor.cen_y", "", "eyedoctor.cen_y", argType::Required, "eyedoctor", "cen_y", false, "float",
@@ -358,20 +379,24 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.blank_thresh", "", "eyedoctor.blank_thresh", argType::Required, "eyedoctor", "blank_thresh",
                 false, "float", "Peak ADU treated as PSF off-camera. 0 = 10% of the sweep's max peak." );
     config.add( "eyedoctor.dm_delay", "", "eyedoctor.dm_delay", argType::Required, "eyedoctor", "dm_delay", false,
-                "float", "Settle time after DM write [s]." );
+                "float", "Extra settle after current_amps matches target [s]." );
+    config.add( "eyedoctor.amp_tol", "", "eyedoctor.amp_tol", argType::Required, "eyedoctor", "amp_tol", false, "float",
+                "Wait until |current_amps-target| < this." );
+    config.add( "eyedoctor.amp_timeout", "", "eyedoctor.amp_timeout", argType::Required, "eyedoctor", "amp_timeout",
+                false, "float", "Seconds to wait for current_amps after sending target_amps." );
     config.add( "eyedoctor.search_kind", "", "eyedoctor.search_kind", argType::Required, "eyedoctor", "search_kind",
                 false, "string", "fit (quadratic) or mean (argmin average)." );
-    config.add( "eyedoctor.reset_to_zero", "", "eyedoctor.reset_to_zero", argType::Required, "eyedoctor",
-                "reset_to_zero", false, "bool",
-                "On run, ignore the current eyeDoc channel and start from zeros." );
+    config.add( "eyedoctor.baseline", "", "eyedoctor.baseline", argType::Required, "eyedoctor", "baseline", false,
+                "bool", "Center each sweep on the live current_amps value (magpyx default)." );
+    config.add( "eyedoctor.randomize", "", "eyedoctor.randomize", argType::Required, "eyedoctor", "randomize", false,
+                "bool", "Shuffle modes inside each cluster." );
     config.add( "eyedoctor.ignore_focus", "", "eyedoctor.ignore_focus", argType::Required, "eyedoctor", "ignore_focus",
-                false, "bool", "Skip focus_mode_index." );
+                false, "bool", "Skip the extra focus-first pass." );
 }
 
 void eyeDoctor::loadConfig()
 {
-    config( m_shmDmEyeDoc, "shmims.shm_dm_eyeDoc" );
-    config( m_shmDmSweep, "shmims.shm_dm_eyeDoc_sweep" );
+    config( m_modesDevice, "eyedoctor.modes_device" );
     config( m_shmDmFlat, "shmims.shm_dm_flat" );
     config( m_shmDmSum, "shmims.shm_dm_sum" );
     config( m_shmCam, "shmims.shm_cam" );
@@ -379,9 +404,7 @@ void eyeDoctor::loadConfig()
     config( m_flatDir, "eyedoctor.flat_dir" );
     config( m_darkLibPath, "eyedoctor.dark_lib_path" );
     config( m_exptimeTol, "eyedoctor.exptime_tol" );
-    config( m_modeType, "eyedoctor.mode_type" );
-    config( m_nModes, "eyedoctor.n_modes" );
-    config( m_modesetPath, "eyedoctor.modeset" );
+    config( m_modesSpec, "eyedoctor.modes" );
     config( m_modeStart, "eyedoctor.mode_start" );
     config( m_modeEnd, "eyedoctor.mode_end" );
     config( m_focusModeIndex, "eyedoctor.focus_mode_index" );
@@ -390,6 +413,8 @@ void eyeDoctor::loadConfig()
     config( m_searchStep, "eyedoctor.search_step" );
     config( m_nSteps, "eyedoctor.n_steps" );
     config( m_nRepeats, "eyedoctor.n_repeats" );
+    config( m_nCluster, "eyedoctor.n_cluster" );
+    config( m_nClusterRepeat, "eyedoctor.n_cluster_repeat" );
     config( m_nSeqRepeat, "eyedoctor.n_seq_repeat" );
     config( m_nImages, "eyedoctor.n_images" );
     config( m_skipFrames, "eyedoctor.skip_frames" );
@@ -398,15 +423,17 @@ void eyeDoctor::loadConfig()
     config( m_satThresh, "eyedoctor.sat_thresh" );
     config( m_blankThresh, "eyedoctor.blank_thresh" );
     config( m_dmDelay, "eyedoctor.dm_delay" );
+    config( m_ampTol, "eyedoctor.amp_tol" );
+    config( m_ampTimeout, "eyedoctor.amp_timeout" );
     config( m_searchKind, "eyedoctor.search_kind" );
-    config( m_resetToZero, "eyedoctor.reset_to_zero" );
+    config( m_baseline, "eyedoctor.baseline" );
+    config( m_randomize, "eyedoctor.randomize" );
     config( m_ignoreFocus, "eyedoctor.ignore_focus" );
 }
 
 int eyeDoctor::appStartup()
 {
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_shmDmEyeDoc, "shm_dm_eyeDoc", "Accumulated eye-doctor DM channel", "shmims" );
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_shmDmSweep, "shm_dm_eyeDoc_sweep", "Grid-search poke DM channel", "shmims" );
+    CREATE_REG_INDI_NEW_TEXT( m_indiP_modesDevice, "modes_device", "INDI dmMode device (alpaoModes)", "modes" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_shmDmFlat, "shm_dm_flat", "cacao flat DM channel", "shmims" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_shmDmSum, "shm_dm_sum", "cacao summed DM command", "shmims" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_shmCam, "shm_cam", "WFS camera image shmim", "shmims" );
@@ -414,13 +441,10 @@ int eyeDoctor::appStartup()
     CREATE_REG_INDI_NEW_TEXT( m_indiP_flatDir, "flat_dir", "Directory for saved flat FITS", "flat" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_darkLibPath, "dark_lib_path", "darkCtrl library directory", "paths" );
 
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_modeType, "mode_type", "zernike, hadamard, or fits", "modes" );
-    CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nModes, "n_modes", 1, 10000, 1, "%d", "Zernike modes to generate", "modes" );
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_modeset, "modeset", "FITS cube when mode_type=fits", "modes" );
-
+    CREATE_REG_INDI_NEW_TEXT( m_indiP_modesSpec, "modes", "Mode list (2...10,12) or empty for start/end", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeStart, "mode_start", 0, 10000, 1, "%d", "First mode index", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeEnd, "mode_end", 0, 10000, 1, "%d", "Last mode index", "algorithm" );
-    CREATE_REG_INDI_NEW_NUMBERI( m_indiP_focusModeIndex, "focus_mode_index", 0, 10000, 1, "%d", "Focus mode index",
+    CREATE_REG_INDI_NEW_NUMBERI( m_indiP_focusModeIndex, "focus_mode_index", 0, 10000, 1, "%d", "Focus-first mode index",
                                 "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_coreRadius, "core_radius", 0.5, 500, 0.5, "%0.2f", "PSF core radius [pix]",
                                 "algorithm" );
@@ -430,6 +454,9 @@ int eyeDoctor::appStartup()
                                 "Amplitude step (0 = use n_steps)", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nSteps, "n_steps", 3, 500, 1, "%d", "Grid samples", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nRepeats, "n_repeats", 1, 50, 1, "%d", "Sweep repeats", "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nCluster, "n_cluster", 1, 500, 1, "%d", "Modes per cluster", "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nClusterRepeat, "n_cluster_repeat", 1, 50, 1, "%d", "Cluster repeats",
+                                "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nSeqRepeat, "n_seq_repeat", 1, 50, 1, "%d", "Full-sequence repeats",
                                 "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_nImages, "n_images", 1, 10000, 1, "%d", "Frames averaged", "algorithm" );
@@ -445,10 +472,31 @@ int eyeDoctor::appStartup()
                                 "Off-camera peak [ADU] (0 = 10% of max)", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_exptimeTol, "exptime_tol", 0, 10, 1e-6, "%0.6f",
                                 "Dark exptime match tolerance [s]", "algorithm" );
-    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_dmDelay, "dm_delay", 0, 10, 0.01, "%0.3f", "DM settle [s]", "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_dmDelay, "dm_delay", 0, 10, 0.01, "%0.3f", "Extra settle [s]", "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_ampTol, "amp_tol", 0, 1, 1e-6, "%0.6f", "current_amps wait tolerance",
+                                "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_ampTimeout, "amp_timeout", 0.1, 120, 0.1, "%0.1f",
+                                "current_amps wait timeout [s]", "algorithm" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_searchKind, "search_kind", "fit or mean", "algorithm" );
 
-    if( createStandardIndiToggleSw( m_indiP_ignoreFocus, "ignore_focus", "Skip focus mode", "algorithm" ) < 0 )
+    if( createStandardIndiToggleSw( m_indiP_baseline, "baseline", "Center sweep on current_amps", "algorithm" ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__, "createStandardIndiToggleSw baseline" } );
+    }
+    if( registerIndiPropertyNew( m_indiP_baseline, INDI_NEWCALLBACK( m_indiP_baseline ) ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__, "registerIndiPropertyNew baseline" } );
+    }
+    if( createStandardIndiToggleSw( m_indiP_randomize, "randomize", "Shuffle modes in each cluster", "algorithm" ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__, "createStandardIndiToggleSw randomize" } );
+    }
+    if( registerIndiPropertyNew( m_indiP_randomize, INDI_NEWCALLBACK( m_indiP_randomize ) ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__, "registerIndiPropertyNew randomize" } );
+    }
+    if( createStandardIndiToggleSw( m_indiP_ignoreFocus, "ignore_focus", "Skip extra focus-first pass", "algorithm" ) <
+        0 )
     {
         return log<software_error, -1>( { __FILE__, __LINE__, "createStandardIndiToggleSw ignore_focus" } );
     }
@@ -497,10 +545,8 @@ int eyeDoctor::appStartup()
     m_indiP_lastDark.add( pcf::IndiElement( "current" ) );
     m_indiP_lastDark["current"].set( m_lastDarkPath );
 
-    m_indiP_shmDmEyeDoc["current"].setValue( m_shmDmEyeDoc );
-    m_indiP_shmDmEyeDoc["target"].setValue( m_shmDmEyeDoc );
-    m_indiP_shmDmSweep["current"].setValue( m_shmDmSweep );
-    m_indiP_shmDmSweep["target"].setValue( m_shmDmSweep );
+    m_indiP_modesDevice["current"].setValue( m_modesDevice );
+    m_indiP_modesDevice["target"].setValue( m_modesDevice );
     m_indiP_shmDmFlat["current"].setValue( m_shmDmFlat );
     m_indiP_shmDmFlat["target"].setValue( m_shmDmFlat );
     m_indiP_shmDmSum["current"].setValue( m_shmDmSum );
@@ -513,12 +559,8 @@ int eyeDoctor::appStartup()
     m_indiP_flatDir["target"].setValue( m_flatDir );
     m_indiP_darkLibPath["current"].setValue( m_darkLibPath );
     m_indiP_darkLibPath["target"].setValue( m_darkLibPath );
-    m_indiP_modeType["current"].setValue( m_modeType );
-    m_indiP_modeType["target"].setValue( m_modeType );
-    m_indiP_nModes["current"].setValue( m_nModes );
-    m_indiP_nModes["target"].setValue( m_nModes );
-    m_indiP_modeset["current"].setValue( m_modesetPath );
-    m_indiP_modeset["target"].setValue( m_modesetPath );
+    m_indiP_modesSpec["current"].setValue( m_modesSpec );
+    m_indiP_modesSpec["target"].setValue( m_modesSpec );
     m_indiP_modeStart["current"].setValue( m_modeStart );
     m_indiP_modeStart["target"].setValue( m_modeStart );
     m_indiP_modeEnd["current"].setValue( m_modeEnd );
@@ -535,6 +577,10 @@ int eyeDoctor::appStartup()
     m_indiP_nSteps["target"].setValue( m_nSteps );
     m_indiP_nRepeats["current"].setValue( m_nRepeats );
     m_indiP_nRepeats["target"].setValue( m_nRepeats );
+    m_indiP_nCluster["current"].setValue( m_nCluster );
+    m_indiP_nCluster["target"].setValue( m_nCluster );
+    m_indiP_nClusterRepeat["current"].setValue( m_nClusterRepeat );
+    m_indiP_nClusterRepeat["target"].setValue( m_nClusterRepeat );
     m_indiP_nSeqRepeat["current"].setValue( m_nSeqRepeat );
     m_indiP_nSeqRepeat["target"].setValue( m_nSeqRepeat );
     m_indiP_nImages["current"].setValue( m_nImages );
@@ -553,21 +599,30 @@ int eyeDoctor::appStartup()
     m_indiP_exptimeTol["target"].setValue( m_exptimeTol );
     m_indiP_dmDelay["current"].setValue( m_dmDelay );
     m_indiP_dmDelay["target"].setValue( m_dmDelay );
+    m_indiP_ampTol["current"].setValue( m_ampTol );
+    m_indiP_ampTol["target"].setValue( m_ampTol );
+    m_indiP_ampTimeout["current"].setValue( m_ampTimeout );
+    m_indiP_ampTimeout["target"].setValue( m_ampTimeout );
     m_indiP_searchKind["current"].setValue( m_searchKind );
     m_indiP_searchKind["target"].setValue( m_searchKind );
 
+    updateSwitchIfChanged( m_indiP_baseline, "toggle", m_baseline ? pcf::IndiElement::On : pcf::IndiElement::Off,
+                           m_baseline ? INDI_OK : INDI_IDLE );
+    updateSwitchIfChanged( m_indiP_randomize, "toggle", m_randomize ? pcf::IndiElement::On : pcf::IndiElement::Off,
+                           m_randomize ? INDI_OK : INDI_IDLE );
     updateSwitchIfChanged( m_indiP_ignoreFocus, "toggle", m_ignoreFocus ? pcf::IndiElement::On : pcf::IndiElement::Off,
-                           INDI_IDLE );
+                           m_ignoreFocus ? INDI_OK : INDI_IDLE );
 
     REG_INDI_SETPROP( m_indiP_remoteExptime, m_camName, "exptime" );
     REG_INDI_SETPROP( m_indiP_remoteFps, m_camName, "fps" );
     REG_INDI_SETPROP( m_indiP_remoteEmgain, m_camName, "emgain" );
     REG_INDI_SETPROP( m_indiP_remoteBlacklevel, m_camName, "blacklevel" );
+    REG_INDI_SETPROP( m_indiP_remoteAmps, m_modesDevice, "current_amps" );
 
     m_worker = std::thread( workerStart, this );
     state( stateCodes::READY );
-    log<text_log>( "eyeDoctor ready (shm_dm_eyeDoc=" + m_shmDmEyeDoc + " shm_dm_sum=" + m_shmDmSum +
-                   " cam_name=" + m_camName + " mode_type=" + m_modeType + ")" );
+    log<text_log>( "eyeDoctor ready (modes_device=" + m_modesDevice + " shm_cam=" + m_shmCam +
+                   " cam_name=" + m_camName + ")" );
     return 0;
 }
 
@@ -788,125 +843,353 @@ void eyeDoctor::warnIfSaturated( const mx::improc::eigenImage<float> &im )
                    logPrio::LOG_WARNING );
 }
 
-void eyeDoctor::warnIfDmNonFinite( const std::string &channel, int nbad )
+std::string eyeDoctor::modeElementName( int mode )
 {
-    if( nbad <= 0 )
-    {
-        return;
-    }
-    if( m_nanWarnedMode == m_currentMode )
-    {
-        return;
-    }
-    m_nanWarnedMode = m_currentMode;
-    log<text_log>( "replaced " + std::to_string( nbad ) + " NaN/Inf pixels with 0 on " + channel +
-                       " (mode " + std::to_string( m_currentMode ) + ")",
-                   logPrio::LOG_WARNING );
+    char buf[16];
+    std::snprintf( buf, sizeof( buf ), "%04d", mode );
+    return buf;
 }
 
-int eyeDoctor::prepareModes( int size0, int size1 )
+int eyeDoctor::nRemoteModes()
 {
-    int rv = -1;
-    if( m_modeType == "zernike" )
+    std::lock_guard<std::mutex> lock( m_modesMutex );
+    return static_cast<int>( m_remoteAmps.size() );
+}
+
+double eyeDoctor::currentAmp( int mode )
+{
+    std::lock_guard<std::mutex> lock( m_modesMutex );
+    if( mode < 0 || mode >= static_cast<int>( m_remoteAmps.size() ) )
     {
-        rv = m_modes.generateZernike( size0, size1, std::max( 1, m_nModes ), 1 );
-        if( rv < 0 )
-        {
-            setStatus( "zernike generation failed" );
-            return -1;
-        }
+        return 0.0;
     }
-    else if( m_modeType == "hadamard" )
+    return m_remoteAmps[static_cast<size_t>( mode )];
+}
+
+int eyeDoctor::waitForModesDevice()
+{
+    if( m_modesDevice.empty() )
     {
-        rv = m_modes.generateHadamard( size0, size1 );
-        if( rv < 0 )
-        {
-            setStatus( "hadamard generation failed" );
-            return -1;
-        }
-    }
-    else if( m_modeType == "fits" )
-    {
-        if( m_modesetPath.empty() )
-        {
-            setStatus( "no modeset path" );
-            return -1;
-        }
-        if( m_modes.load( m_modesetPath, "modes" ) < 0 )
-        {
-            setStatus( "failed to load modeset" );
-            return -1;
-        }
-        if( m_modes.size0() != size0 || m_modes.size1() != size1 )
-        {
-            setStatus( "modeset size != DM shmim size" );
-            log<software_error>( { __FILE__, __LINE__,
-                                   "modes " + std::to_string( m_modes.size0() ) + "x" +
-                                       std::to_string( m_modes.size1() ) + " vs dm " + std::to_string( size0 ) + "x" +
-                                       std::to_string( size1 ) } );
-            return -1;
-        }
-    }
-    else
-    {
-        setStatus( "mode_type must be zernike, hadamard, or fits" );
+        setStatus( "modes_device is empty" );
         return -1;
     }
-
-    m_nModesLoaded = m_modes.nModes();
-    updateIfChanged( m_indiP_nModesLoaded, "current", static_cast<double>( m_nModesLoaded ) );
-    const int nbad = m_modes.sanitize();
-    if( nbad > 0 )
+    const auto t0 = std::chrono::steady_clock::now();
+    const double timeout = std::max( 0.1, m_ampTimeout );
+    while( !stopping() )
     {
-        log<text_log>( "modes: replaced " + std::to_string( nbad ) + " non-finite pixels with 0",
-                       logPrio::LOG_WARNING );
+        if( nRemoteModes() > 0 )
+        {
+            return 0;
+        }
+        const double elapsed =
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+        if( elapsed > timeout )
+        {
+            setStatus( "no current_amps from " + m_modesDevice );
+            log<text_log>( "waiting for " + m_modesDevice + ".current_amps timed out", logPrio::LOG_ERROR );
+            return -1;
+        }
+        mx::sys::milliSleep( 20 );
     }
-    log<text_log>( "modes: " + m_modes.name + " n=" + std::to_string( m_nModesLoaded ) + " " +
-                   std::to_string( size0 ) + "x" + std::to_string( size1 ) );
+    return -2;
+}
+
+int eyeDoctor::sendModeAmp( int mode, double amp )
+{
+    if( dev::doubleBitsNonFinite( amp ) )
+    {
+        amp = 0.0;
+    }
+    const std::string el = modeElementName( mode );
+    pcf::IndiProperty ip( pcf::IndiProperty::Number );
+    ip.setDevice( m_modesDevice );
+    ip.setName( "target_amps" );
+    ip.add( pcf::IndiElement( el ) );
+    ip[el] = amp;
+    if( sendNewProperty( ip ) < 0 )
+    {
+        log<software_error>( { __FILE__, __LINE__, "sendNewProperty " + m_modesDevice + ".target_amps." + el } );
+        return -1;
+    }
     return 0;
 }
 
-int eyeDoctor::zeroAlgoChannels()
+int eyeDoctor::waitModeAmp( int mode, double amp )
 {
-    m_hw.dmEyeDocName = m_shmDmEyeDoc;
-    m_hw.dmSweepName = m_shmDmSweep;
-    m_hw.disconnect();
-    if( m_hw.connectAlgoChannels() < 0 )
+    const auto t0 = std::chrono::steady_clock::now();
+    const double timeout = std::max( 0.1, m_ampTimeout );
+    while( !stopping() )
     {
-        log<software_error>( { __FILE__, __LINE__, m_hw.error() } );
-        setStatus( "DM connect failed: " + m_hw.error() );
+        if( std::fabs( currentAmp( mode ) - amp ) <= m_ampTol )
+        {
+            return 0;
+        }
+        const double elapsed =
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+        if( elapsed > timeout )
+        {
+            log<text_log>( "timeout waiting for " + m_modesDevice + ".current_amps." + modeElementName( mode ) +
+                               " = " + std::to_string( amp ),
+                           logPrio::LOG_WARNING );
+            return -1;
+        }
+        mx::sys::milliSleep( 5 );
+    }
+    return -2;
+}
+
+int eyeDoctor::sendModeAndWait( int mode, double amp )
+{
+    for( int attempt = 0; attempt < 3; ++attempt )
+    {
+        if( stopping() )
+        {
+            return -2;
+        }
+        if( sendModeAmp( mode, amp ) < 0 )
+        {
+            return -1;
+        }
+        const int wrv = waitModeAmp( mode, amp );
+        if( wrv == 0 )
+        {
+            if( m_dmDelay > 0 )
+            {
+                mx::sys::milliSleep( static_cast<unsigned>( m_dmDelay * 1000.0 ) );
+            }
+            return 0;
+        }
+        if( wrv == -2 )
+        {
+            return -2;
+        }
+    }
+    return -1;
+}
+
+int eyeDoctor::zeroAllModes()
+{
+    const int n = nRemoteModes();
+    if( n <= 0 )
+    {
+        setStatus( "modes device has not published current_amps" );
         return -1;
     }
-    if( m_hw.zeroEyeDoc() < 0 || m_hw.zeroSweep() < 0 )
+
+    pcf::IndiProperty ip( pcf::IndiProperty::Number );
+    ip.setDevice( m_modesDevice );
+    ip.setName( "target_amps" );
+    for( int i = 0; i < n; ++i )
     {
-        setStatus( "failed to zero eye-doctor channels" );
+        const std::string el = modeElementName( i );
+        ip.add( pcf::IndiElement( el ) );
+        ip[el] = 0.0;
+    }
+    if( sendNewProperty( ip ) < 0 )
+    {
+        setStatus( "failed to send target_amps=0 to " + m_modesDevice );
         return -1;
     }
-    m_currentMode = -1;
-    updateIfChanged( m_indiP_currentMode, "current", -1.0 );
-    return 0;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const double timeout = std::max( 0.1, m_ampTimeout );
+    while( !stopping() )
+    {
+        bool ok = true;
+        {
+            std::lock_guard<std::mutex> lock( m_modesMutex );
+            if( static_cast<int>( m_remoteAmps.size() ) < n )
+            {
+                ok = false;
+            }
+            else
+            {
+                for( int i = 0; i < n; ++i )
+                {
+                    if( std::fabs( m_remoteAmps[static_cast<size_t>( i )] ) > m_ampTol )
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if( ok )
+        {
+            m_currentMode = -1;
+            updateIfChanged( m_indiP_currentMode, "current", -1.0 );
+            return 0;
+        }
+        const double elapsed =
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+        if( elapsed > timeout )
+        {
+            setStatus( "timeout waiting for " + m_modesDevice + " current_amps to reach 0" );
+            return -1;
+        }
+        mx::sys::milliSleep( 5 );
+    }
+    return -2;
 }
 
 int eyeDoctor::abortAndZero()
 {
     setStatus( "aborting" );
-    if( zeroAlgoChannels() < 0 )
+    if( waitForModesDevice() < 0 )
     {
         return -1;
     }
-    log<text_log>( "aborted: zeroed " + m_shmDmEyeDoc + " and " + m_shmDmSweep );
+    if( zeroAllModes() < 0 )
+    {
+        return -1;
+    }
+    log<text_log>( "aborted: zeroed " + m_modesDevice + " target_amps" );
     return 0;
 }
 
 int eyeDoctor::resetToZero()
 {
     setStatus( "resetting to zero" );
-    if( zeroAlgoChannels() < 0 )
+    if( waitForModesDevice() < 0 )
     {
         return -1;
     }
-    log<text_log>( "reset_to_zero: wrote 0 to " + m_shmDmEyeDoc + " and " + m_shmDmSweep );
+    if( zeroAllModes() < 0 )
+    {
+        return -1;
+    }
+    log<text_log>( "reset_to_zero: wrote 0 to " + m_modesDevice + ".target_amps" );
     return 0;
+}
+
+std::vector<int> eyeDoctor::parseModeSpec( const std::string &spec, int start, int end )
+{
+    std::vector<int> modes;
+    auto trim = []( std::string s ) {
+        const auto a = s.find_first_not_of( " \t" );
+        if( a == std::string::npos )
+        {
+            return std::string();
+        }
+        const auto b = s.find_last_not_of( " \t" );
+        return s.substr( a, b - a + 1 );
+    };
+
+    const std::string s = trim( spec );
+    if( s.empty() )
+    {
+        if( end < start )
+        {
+            return modes;
+        }
+        for( int i = start; i <= end; ++i )
+        {
+            modes.push_back( i );
+        }
+        return modes;
+    }
+
+    size_t pos = 0;
+    while( pos < s.size() )
+    {
+        size_t comma = s.find( ',', pos );
+        if( comma == std::string::npos )
+        {
+            comma = s.size();
+        }
+        const std::string tok = trim( s.substr( pos, comma - pos ) );
+        pos = comma + 1;
+        if( tok.empty() )
+        {
+            continue;
+        }
+        const size_t dots = tok.find( "..." );
+        if( dots != std::string::npos )
+        {
+            const int a = std::atoi( tok.substr( 0, dots ).c_str() );
+            const int b = std::atoi( tok.substr( dots + 3 ).c_str() );
+            if( a > b )
+            {
+                for( int i = a; i >= b; --i )
+                {
+                    modes.push_back( i );
+                }
+            }
+            else
+            {
+                for( int i = a; i <= b; ++i )
+                {
+                    modes.push_back( i );
+                }
+            }
+        }
+        else
+        {
+            modes.push_back( std::atoi( tok.c_str() ) );
+        }
+    }
+    return modes;
+}
+
+std::vector<int> eyeDoctor::requestedModes() const
+{
+    return parseModeSpec( m_modesSpec, m_modeStart, m_modeEnd );
+}
+
+std::vector<int> eyeDoctor::allowedModes( const std::vector<int> &req, int nAvail, bool *truncated ) const
+{
+    std::vector<int> out;
+    bool trunc = false;
+    for( int m : req )
+    {
+        if( m >= 0 && m < nAvail )
+        {
+            out.push_back( m );
+        }
+        else
+        {
+            trunc = true;
+        }
+    }
+    if( truncated )
+    {
+        *truncated = trunc;
+    }
+    return out;
+}
+
+std::vector<int> eyeDoctor::buildSequence( const std::vector<int> &modes ) const
+{
+    std::vector<int> seq;
+    if( modes.empty() )
+    {
+        return seq;
+    }
+    const int ncl = std::max( 1, m_nCluster );
+    const int ncr = std::max( 1, m_nClusterRepeat );
+    const int nsr = std::max( 1, m_nSeqRepeat );
+    static thread_local std::mt19937 rng{ std::random_device{}() };
+
+    for( int s = 0; s < nsr; ++s )
+    {
+        for( size_t i = 0; i < modes.size(); i += static_cast<size_t>( ncl ) )
+        {
+            std::vector<int> cluster;
+            const size_t j1 = std::min( i + static_cast<size_t>( ncl ), modes.size() );
+            cluster.assign( modes.begin() + static_cast<std::ptrdiff_t>( i ),
+                            modes.begin() + static_cast<std::ptrdiff_t>( j1 ) );
+            for( int r = 0; r < ncr; ++r )
+            {
+                std::vector<int> cur = cluster;
+                if( m_randomize && cur.size() > 1 )
+                {
+                    std::shuffle( cur.begin(), cur.end(), rng );
+                }
+                seq.insert( seq.end(), cur.begin(), cur.end() );
+            }
+        }
+    }
+    return seq;
 }
 
 lina::DarkMatchFilter eyeDoctor::darkFilter() const
@@ -1211,8 +1494,6 @@ int eyeDoctor::saveFlat()
         return -1;
     }
 
-    m_hw.dmEyeDocName = m_shmDmEyeDoc;
-    m_hw.dmSweepName = m_shmDmSweep;
     m_hw.dmFlatName = m_shmDmFlat;
     m_hw.dmSumName = m_shmDmSum;
     m_hw.disconnect();
@@ -1242,10 +1523,13 @@ int eyeDoctor::saveFlat()
         setStatus( "failed to write shm_dm_flat" );
         return -1;
     }
-    if( m_hw.zeroEyeDoc() < 0 || m_hw.zeroSweep() < 0 )
+
+    if( waitForModesDevice() == 0 )
     {
-        setStatus( "failed to zero eye-doctor channels" );
-        return -1;
+        if( zeroAllModes() < 0 )
+        {
+            log<text_log>( "saved flat but failed to zero " + m_modesDevice, logPrio::LOG_WARNING );
+        }
     }
 
     if( ensureDirectory( m_flatDir ) < 0 )
@@ -1273,16 +1557,127 @@ int eyeDoctor::saveFlat()
     return 0;
 }
 
+int eyeDoctor::optimizeMode( int mi, mx::improc::eigenImage<float> &camIm )
+{
+    m_currentMode = mi;
+    m_satWarnedMode = -2;
+    updateIfChanged( m_indiP_currentMode, "current", static_cast<double>( mi ) );
+
+    const double baseval = m_baseline ? currentAmp( mi ) : 0.0;
+    const double lo = -0.5 * m_searchRange;
+    const double hi = 0.5 * m_searchRange;
+    log<text_log>( "Mode " + std::to_string( mi ) + ": scanning " + std::to_string( lo + baseval ) + " to " +
+                   std::to_string( hi + baseval ) + " (baseline " + std::to_string( baseval ) + ")" );
+
+    double metric0 = 0;
+    if( measureMetric( camIm, metric0 ) < 0 )
+    {
+        if( stopping() )
+        {
+            return -2;
+        }
+        setStatus( "camera grab failed" );
+        return -1;
+    }
+
+    dev::gridSweep sweep;
+    sweep.lo = lo;
+    sweep.hi = hi;
+    if( m_searchStep > 0.0 && m_searchRange > 0.0 )
+    {
+        sweep.nSteps = std::max( 3, static_cast<int>( std::lround( m_searchRange / m_searchStep ) ) + 1 );
+    }
+    else
+    {
+        sweep.nSteps = std::max( 3, m_nSteps );
+    }
+    sweep.nRepeats = std::max( 1, m_nRepeats );
+    sweep.kind = m_searchKind;
+    sweep.blankThresh = m_blankThresh;
+
+    const auto sw = sweep.run(
+        [&]( double a ) -> int {
+            const int rv = sendModeAndWait( mi, baseval + a );
+            if( rv < 0 )
+            {
+                return rv;
+            }
+            return 0;
+        },
+        [&]() -> dev::metricSample {
+            double m = 0;
+            if( measureMetric( camIm, m ) < 0 )
+            {
+                return { 1e6, 0.0 };
+            }
+            const double peak = camIm.size() > 0 ? static_cast<double>( camIm.maxCoeff() ) : 0.0;
+            return { m, peak };
+        },
+        [this]() { return stopping(); } );
+
+    if( stopping() || sw.stopped )
+    {
+        sendModeAndWait( mi, baseval );
+        return -2;
+    }
+
+    const double useAmp = baseval + dev::finiteOrZero( sw.amp );
+    if( m_searchKind == "fit" && !sw.usedFit )
+    {
+        std::string why = "mode " + std::to_string( mi ) + ": quadratic fit rejected";
+        if( sw.truncated )
+        {
+            why += ", truncated to " + std::to_string( sw.nGood ) + "/" + std::to_string( sw.nTotal ) +
+                   " on-camera samples";
+        }
+        if( sw.refined )
+        {
+            why += ", refined around best sample";
+        }
+        if( dev::finiteOrZero( sw.amp ) == 0.0 )
+        {
+            why += ", leaving amp=" + std::to_string( baseval );
+        }
+        else
+        {
+            why += ", using best-sample amp=" + std::to_string( useAmp );
+        }
+        log<text_log>( why, logPrio::LOG_WARNING );
+    }
+    else if( m_searchKind == "fit" && ( sw.truncated || sw.refined ) )
+    {
+        log<text_log>( "mode " + std::to_string( mi ) + ": quadratic on " + std::to_string( sw.nGood ) + "/" +
+                           std::to_string( sw.nTotal ) + " on-camera samples" +
+                           ( sw.refined ? " after refine" : "" ),
+                       logPrio::LOG_INFO );
+    }
+
+    if( sendModeAndWait( mi, useAmp ) < 0 )
+    {
+        setStatus( "failed to command " + m_modesDevice + " mode " + std::to_string( mi ) );
+        return -1;
+    }
+
+    double metric1 = 0;
+    measureMetric( camIm, metric1 );
+    m_lastAmp = useAmp;
+    m_lastMetric = dev::finiteOrZero( metric1 );
+    updateIfChanged( m_indiP_optAmp, "current", m_lastAmp );
+    updateIfChanged( m_indiP_metric, "current", m_lastMetric );
+    log<text_log>( "mode " + std::to_string( mi ) + " amp " + std::to_string( baseval ) + " -> " +
+                   std::to_string( useAmp ) + " metric " + std::to_string( metric0 ) + " -> " +
+                   std::to_string( metric1 ) );
+    return 0;
+}
+
 int eyeDoctor::runOptimization()
 {
     setStatus( "connecting" );
 
-    m_hw.dmEyeDocName = m_shmDmEyeDoc;
-    m_hw.dmSweepName = m_shmDmSweep;
     m_hw.camName = m_shmCam;
     m_hw.camDevice = m_camName;
     m_hw.disconnect();
-    if( m_hw.connectLoop() < 0 )
+    if( m_hw.connectCamera() < 0 )
     {
         log<software_error>( { __FILE__, __LINE__, m_hw.error() } );
         setStatus( "connect failed: " + m_hw.error() );
@@ -1293,191 +1688,92 @@ int eyeDoctor::runOptimization()
         return -2;
     }
 
-    setStatus( "generating modes" );
-    if( prepareModes( static_cast<int>( m_hw.dmEyeDoc.size0() ), static_cast<int>( m_hw.dmEyeDoc.size1() ) ) < 0 )
+    setStatus( "waiting for " + m_modesDevice );
+    if( waitForModesDevice() < 0 )
     {
-        return -1;
-    }
-    if( stopping() )
-    {
-        return -2;
-    }
-
-    const int start = std::max( 0, m_modeStart );
-    const int end = std::min( m_modeEnd, m_nModesLoaded - 1 );
-    if( end < start )
-    {
-        setStatus( "invalid mode range" );
         return -1;
     }
 
-    mx::improc::eigenImage<float> eyeDocCmd;
-    if( m_resetToZero )
+    const int nAvail = nRemoteModes();
+    m_nModesLoaded = nAvail;
+    updateIfChanged( m_indiP_nModesLoaded, "current", static_cast<double>( m_nModesLoaded ) );
+    log<text_log>( "Number of modes available on " + m_modesDevice + ": " + std::to_string( nAvail ) );
+
+    bool truncated = false;
+    const std::vector<int> allowed = allowedModes( requestedModes(), nAvail, &truncated );
+    if( truncated )
     {
-        eyeDocCmd.resize( m_modes.size0(), m_modes.size1() );
-        eyeDocCmd.setZero();
+        log<text_log>( "requested modes outside 0.." + std::to_string( nAvail - 1 ) + " on " + m_modesDevice +
+                           "; not correcting those modes",
+                       logPrio::LOG_WARNING );
     }
-    else if( m_hw.grabEyeDoc( eyeDocCmd ) < 0 )
+    if( allowed.empty() )
     {
-        setStatus( "failed to read eyeDoc channel" );
+        setStatus( "no requested modes within " + m_modesDevice + " bounds" );
         return -1;
     }
-    else
+
+    if( !m_baseline )
     {
-        const int nbad = dev::replaceNonFinite( eyeDocCmd );
-        if( nbad > 0 )
+        log<text_log>( "baseline off: resetting all mode coefficients to 0" );
+        if( zeroAllModes() < 0 )
         {
-            log<text_log>( "eyeDoc channel had " + std::to_string( nbad ) +
-                               " NaN/Inf pixels; replacing with 0 so dmcomb does not poison the sum",
-                           logPrio::LOG_WARNING );
+            return -1;
         }
     }
 
-    if( m_hw.writeEyeDoc( eyeDocCmd ) < 0 || m_hw.zeroSweep() < 0 )
+    std::ostringstream ms;
+    ms << "Optimizing modes:";
+    for( int m : allowed )
     {
-        setStatus( "failed to initialize DM channels" );
-        return -1;
+        ms << " " << m;
     }
+    log<text_log>( ms.str() );
 
     if( !m_darkLibPath.empty() )
     {
         refreshDark( false );
     }
 
-    const int seqRepeats = std::max( 1, m_nSeqRepeat );
     mx::improc::eigenImage<float> camIm;
 
-    for( int seq = 0; seq < seqRepeats && !stopping(); ++seq )
+    const bool focusFirst = !m_ignoreFocus && allowed.size() > 1;
+    if( focusFirst )
     {
-        for( int mi = start; mi <= end && !stopping(); ++mi )
+        bool haveFocus = false;
+        for( int m : allowed )
         {
-            if( m_ignoreFocus && mi == m_focusModeIndex )
+            if( m == m_focusModeIndex )
             {
-                continue;
+                haveFocus = true;
+                break;
             }
-
-            m_currentMode = mi;
-            m_satWarnedMode = -2;
-            m_nanWarnedMode = -2;
-            updateIfChanged( m_indiP_currentMode, "current", static_cast<double>( mi ) );
-            setStatus( "mode " + std::to_string( mi ) + " seq " + std::to_string( seq + 1 ) + "/" +
-                       std::to_string( seqRepeats ) );
-
-            double metric0 = 0;
-            if( measureMetric( camIm, metric0 ) < 0 )
+        }
+        if( haveFocus )
+        {
+            log<text_log>( "Optimizing focus first (mode " + std::to_string( m_focusModeIndex ) + ")" );
+            setStatus( "mode " + std::to_string( m_focusModeIndex ) + " (focus first)" );
+            const int frv = optimizeMode( m_focusModeIndex, camIm );
+            if( frv < 0 )
             {
-                if( stopping() )
-                {
-                    return -2;
-                }
-                setStatus( "camera grab failed" );
-                return -1;
+                return frv;
             }
-
-            mx::improc::eigenImage<float> mode = m_modes.modes.image( mi );
-            dev::gridSweep sweep;
-            sweep.lo = -0.5 * m_searchRange;
-            sweep.hi = 0.5 * m_searchRange;
-            if( m_searchStep > 0.0 && m_searchRange > 0.0 )
-            {
-                sweep.nSteps = std::max( 3, static_cast<int>( std::lround( m_searchRange / m_searchStep ) ) + 1 );
-            }
-            else
-            {
-                sweep.nSteps = std::max( 3, m_nSteps );
-            }
-            sweep.nRepeats = std::max( 1, m_nRepeats );
-            sweep.kind = m_searchKind;
-            sweep.blankThresh = m_blankThresh;
-
-            const auto sw = sweep.run(
-                [&]( double a ) -> int {
-                    if( m_hw.applySweep( mode, a, &eyeDocCmd ) < 0 )
-                    {
-                        return -1;
-                    }
-                    const int nbad = m_hw.singleChannel() ? m_hw.dmEyeDoc.lastNonFinite()
-                                                          : m_hw.dmSweep.lastNonFinite();
-                    warnIfDmNonFinite( m_hw.singleChannel() ? m_shmDmEyeDoc : m_shmDmSweep, nbad );
-                    if( m_dmDelay > 0 )
-                    {
-                        mx::sys::milliSleep( static_cast<unsigned>( m_dmDelay * 1000.0 ) );
-                    }
-                    return 0;
-                },
-                [&]() -> dev::metricSample {
-                    double m = 0;
-                    if( measureMetric( camIm, m ) < 0 )
-                    {
-                        return { 1e6, 0.0 };
-                    }
-                    const double peak = camIm.size() > 0 ? static_cast<double>( camIm.maxCoeff() ) : 0.0;
-                    return { m, peak };
-                },
-                [this]() { return stopping(); } );
-
-            if( stopping() || sw.stopped )
-            {
-                m_hw.zeroSweep();
-                return -2;
-            }
-
-            const double useAmp = dev::finiteOrZero( sw.amp );
-            if( m_searchKind == "fit" && !sw.usedFit )
-            {
-                std::string why = "mode " + std::to_string( mi ) + ": quadratic fit rejected";
-                if( sw.truncated )
-                {
-                    why += ", truncated to " + std::to_string( sw.nGood ) + "/" + std::to_string( sw.nTotal ) +
-                           " on-camera samples";
-                }
-                if( sw.refined )
-                {
-                    why += ", refined around best sample";
-                }
-                if( useAmp == 0.0 )
-                {
-                    why += ", leaving amp=0";
-                }
-                else
-                {
-                    why += ", using best-sample amp=" + std::to_string( useAmp );
-                }
-                log<text_log>( why, logPrio::LOG_WARNING );
-            }
-            else if( m_searchKind == "fit" && ( sw.truncated || sw.refined ) )
-            {
-                log<text_log>( "mode " + std::to_string( mi ) + ": quadratic on " +
-                                   std::to_string( sw.nGood ) + "/" + std::to_string( sw.nTotal ) +
-                                   " on-camera samples" + ( sw.refined ? " after refine" : "" ),
-                               logPrio::LOG_INFO );
-            }
-
-            eyeDocCmd += mode * static_cast<float>( useAmp );
-            dev::replaceNonFinite( eyeDocCmd );
-            if( m_hw.writeEyeDoc( eyeDocCmd ) < 0 || m_hw.zeroSweep() < 0 )
-            {
-                setStatus( "DM write failed" );
-                return -1;
-            }
-            warnIfDmNonFinite( m_shmDmEyeDoc, m_hw.dmEyeDoc.lastNonFinite() );
-            if( m_dmDelay > 0 )
-            {
-                mx::sys::milliSleep( static_cast<unsigned>( m_dmDelay * 1000.0 ) );
-            }
-
-            double metric1 = 0;
-            measureMetric( camIm, metric1 );
-            m_lastAmp = useAmp;
-            m_lastMetric = dev::finiteOrZero( metric1 );
-            updateIfChanged( m_indiP_optAmp, "current", m_lastAmp );
-            updateIfChanged( m_indiP_metric, "current", m_lastMetric );
-            log<text_log>( "mode " + std::to_string( mi ) + " amp=" + std::to_string( useAmp ) + " metric " +
-                           std::to_string( metric0 ) + " -> " + std::to_string( metric1 ) );
         }
     }
 
-    m_hw.zeroSweep();
+    const std::vector<int> seq = buildSequence( allowed );
+    for( size_t i = 0; i < seq.size() && !stopping(); ++i )
+    {
+        const int mi = seq[i];
+        setStatus( "mode " + std::to_string( mi ) + " (" + std::to_string( i + 1 ) + "/" +
+                   std::to_string( seq.size() ) + ")" );
+        const int rv = optimizeMode( mi, camIm );
+        if( rv < 0 )
+        {
+            return rv;
+        }
+    }
+
     m_currentMode = -1;
     updateIfChanged( m_indiP_currentMode, "current", -1.0 );
     return stopping() ? -2 : 0;
@@ -1485,29 +1781,19 @@ int eyeDoctor::runOptimization()
 
 // ---------- INDI NEW ----------
 
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_shmDmEyeDoc )( const pcf::IndiProperty &ipRecv )
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modesDevice )( const pcf::IndiProperty &ipRecv )
 {
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_shmDmEyeDoc, ipRecv );
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modesDevice, ipRecv );
     std::string target;
-    if( indiTargetUpdate( m_indiP_shmDmEyeDoc, target, ipRecv, false ) < 0 )
+    if( indiTargetUpdate( m_indiP_modesDevice, target, ipRecv, false ) < 0 )
     {
         return log<software_error, -1>( { __FILE__, __LINE__ } );
     }
-    m_shmDmEyeDoc = target;
-    updateIfChanged( m_indiP_shmDmEyeDoc, "current", m_shmDmEyeDoc );
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_shmDmSweep )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_shmDmSweep, ipRecv );
-    std::string target;
-    if( indiTargetUpdate( m_indiP_shmDmSweep, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    m_shmDmSweep = target;
-    updateIfChanged( m_indiP_shmDmSweep, "current", m_shmDmSweep );
+    log<text_log>( "modes_device: " + m_modesDevice + " -> " + target +
+                       " (current_amps SET still bound to startup device; restart to resubscribe)",
+                   logPrio::LOG_WARNING );
+    m_modesDevice = target;
+    updateIfChanged( m_indiP_modesDevice, "current", m_modesDevice );
     return 0;
 }
 
@@ -1598,47 +1884,16 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_darkLibPath )( const pcf::IndiProperty
     return 0;
 }
 
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modeType )( const pcf::IndiProperty &ipRecv )
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modesSpec )( const pcf::IndiProperty &ipRecv )
 {
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modeType, ipRecv );
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modesSpec, ipRecv );
     std::string target;
-    if( indiTargetUpdate( m_indiP_modeType, target, ipRecv, false ) < 0 )
+    if( indiTargetUpdate( m_indiP_modesSpec, target, ipRecv, false ) < 0 )
     {
         return log<software_error, -1>( { __FILE__, __LINE__ } );
     }
-    if( target != "zernike" && target != "hadamard" && target != "fits" )
-    {
-        log<text_log>( "mode_type must be zernike, hadamard, or fits", logPrio::LOG_ERROR );
-        return -1;
-    }
-    m_modeType = target;
-    updateIfChanged( m_indiP_modeType, "current", m_modeType );
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_nModes )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_nModes, ipRecv );
-    int target = 0;
-    if( indiTargetUpdate( m_indiP_nModes, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    m_nModes = target;
-    updateIfChanged( m_indiP_nModes, "current", m_nModes );
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modeset )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modeset, ipRecv );
-    std::string target;
-    if( indiTargetUpdate( m_indiP_modeset, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    m_modesetPath = target;
-    updateIfChanged( m_indiP_modeset, "current", m_modesetPath );
+    m_modesSpec = target;
+    updateIfChanged( m_indiP_modesSpec, "current", m_modesSpec );
     return 0;
 }
 
@@ -1743,6 +1998,32 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_nRepeats )( const pcf::IndiProperty &i
     }
     m_nRepeats = target;
     updateIfChanged( m_indiP_nRepeats, "current", m_nRepeats );
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_nCluster )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_nCluster, ipRecv );
+    int target = 0;
+    if( indiTargetUpdate( m_indiP_nCluster, target, ipRecv, false ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__ } );
+    }
+    m_nCluster = target;
+    updateIfChanged( m_indiP_nCluster, "current", m_nCluster );
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_nClusterRepeat )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_nClusterRepeat, ipRecv );
+    int target = 0;
+    if( indiTargetUpdate( m_indiP_nClusterRepeat, target, ipRecv, false ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__ } );
+    }
+    m_nClusterRepeat = target;
+    updateIfChanged( m_indiP_nClusterRepeat, "current", m_nClusterRepeat );
     return 0;
 }
 
@@ -1863,6 +2144,32 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_dmDelay )( const pcf::IndiProperty &ip
     return 0;
 }
 
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_ampTol )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_ampTol, ipRecv );
+    float target = 0;
+    if( indiTargetUpdate( m_indiP_ampTol, target, ipRecv, false ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__ } );
+    }
+    m_ampTol = target;
+    updateIfChanged( m_indiP_ampTol, "current", m_ampTol );
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_ampTimeout )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_ampTimeout, ipRecv );
+    float target = 0;
+    if( indiTargetUpdate( m_indiP_ampTimeout, target, ipRecv, false ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__ } );
+    }
+    m_ampTimeout = target;
+    updateIfChanged( m_indiP_ampTimeout, "current", m_ampTimeout );
+    return 0;
+}
+
 INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_searchKind )( const pcf::IndiProperty &ipRecv )
 {
     INDI_VALIDATE_CALLBACK_PROPS( m_indiP_searchKind, ipRecv );
@@ -1895,6 +2202,32 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_resetToZero )( const pcf::IndiProperty
         setRunToggle( false, pcf::IndiProperty::Idle );
         updateSwitchIfChanged( m_indiP_resetToZero, "request", pcf::IndiElement::On, INDI_BUSY );
     }
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_baseline )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_baseline, ipRecv );
+    if( !ipRecv.find( "toggle" ) )
+    {
+        return 0;
+    }
+    m_baseline = ( ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On );
+    updateSwitchIfChanged( m_indiP_baseline, "toggle", m_baseline ? pcf::IndiElement::On : pcf::IndiElement::Off,
+                           m_baseline ? pcf::IndiProperty::Ok : pcf::IndiProperty::Idle );
+    return 0;
+}
+
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_randomize )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_randomize, ipRecv );
+    if( !ipRecv.find( "toggle" ) )
+    {
+        return 0;
+    }
+    m_randomize = ( ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On );
+    updateSwitchIfChanged( m_indiP_randomize, "toggle", m_randomize ? pcf::IndiElement::On : pcf::IndiElement::Off,
+                           m_randomize ? pcf::IndiProperty::Ok : pcf::IndiProperty::Idle );
     return 0;
 }
 
@@ -2053,6 +2386,55 @@ INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteBlacklevel )( const pcf::IndiPro
 {
     INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteBlacklevel, ipRecv );
     parseIndiCurrentNumber( ipRecv, m_remoteBlacklevel );
+    return 0;
+}
+
+INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteAmps )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteAmps, ipRecv );
+
+    int maxIdx = -1;
+    std::vector<std::pair<int, double>> vals;
+    vals.reserve( ipRecv.getNumElements() );
+    for( const auto &kv : ipRecv.getElements() )
+    {
+        char *end = nullptr;
+        const long idx = std::strtol( kv.first.c_str(), &end, 10 );
+        if( end == kv.first.c_str() || idx < 0 )
+        {
+            continue;
+        }
+        double v = 0.0;
+        try
+        {
+            v = kv.second.get<double>();
+        }
+        catch( ... )
+        {
+            continue;
+        }
+        vals.emplace_back( static_cast<int>( idx ), v );
+        if( static_cast<int>( idx ) > maxIdx )
+        {
+            maxIdx = static_cast<int>( idx );
+        }
+    }
+
+    if( maxIdx < 0 )
+    {
+        return 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock( m_modesMutex );
+        m_remoteAmps.assign( static_cast<size_t>( maxIdx + 1 ), 0.0 );
+        for( const auto &p : vals )
+        {
+            m_remoteAmps[static_cast<size_t>( p.first )] = p.second;
+        }
+        m_nModesLoaded = static_cast<int>( m_remoteAmps.size() );
+    }
+    updateIfChanged( m_indiP_nModesLoaded, "current", static_cast<double>( m_nModesLoaded ) );
     return 0;
 }
 
