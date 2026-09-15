@@ -7,8 +7,8 @@
 # process configName). Requires a running dmMode instance (alpaoModes, etc.).
 
 [shmims]
-shm_dm_flat = dm01disp00
-shm_dm_sum = dm01disp
+shm_dm_flat = dm00disp00
+shm_dm_sum = dm00disp
 shm_cam = camsci
 
 [camera]
@@ -28,8 +28,8 @@ n_repeats = 3
 n_cluster = 5
 n_cluster_repeat = 1
 n_seq_repeat = 1
-n_images = 1
-skip_frames = 1
+n_images = 3
+skip_frames = 2
 # cen_x = 255
 # cen_y = 255
 sat_thresh = 55000
@@ -41,6 +41,7 @@ search_kind = grid
 baseline = true
 randomize = true
 ignore_focus = false
-flat_dir = /opt/MagAOX/calib/dm/bmc_1k/flats
+#flat_dir = /opt/MagAOX/calib/dm/bmc_1k/flats
+flat_dir = /opt/MagAOX/calib/dm/alpao_bax735/flats
 # dark_lib_path = /opt/MagAOX/data/darks/camsci
 exptime_tol = 0.0001
