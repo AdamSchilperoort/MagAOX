@@ -58,8 +58,10 @@ Matches magpyx `eye_doctor_comprehensive`:
    `current_amps` matches within `amp_tol` (timeout `amp_timeout`). Then
    `skip_frames` camera frames are discarded and `n_images` are averaged.
 5. Metric is magpyx `get_image_coresum` (negative core flux after edge-median
-   background). Quadratic fit with the same blank-sample truncation / refine
-   fallback as before.
+   background). `search_kind` matches magpyx: `grid` (default, the
+   `dm_eye_doctor` path) samples `n_steps` amplitudes `n_repeats` times and
+   fits a quadratic; `brent` is scipy bounded Brent. Grid uses the same
+   blank-sample truncation / refine fallback as before.
 
 Toggle INDI `run` to start; toggle `run` off to stop without zeroing modes.
 Pulse `reset_to_zero` to send 0 to every `target_amps` element. Pulse `abort`

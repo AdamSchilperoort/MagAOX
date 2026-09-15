@@ -160,7 +160,8 @@ utils_to_build = \
 	logstream \
 	cursesINDI \
 	xrif2shmim \
-	xrif2fits
+	xrif2fits \
+	randomize_dm
 
 scripts_to_install = \
 	query_seeing \

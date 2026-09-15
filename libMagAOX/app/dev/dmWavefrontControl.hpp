@@ -34,6 +34,9 @@
 #include <mx/ioutils/fits/fitsFile.hpp>
 #include <mx/sigproc/zernike.hpp>
 
+#include <boost/cstdint.hpp>
+#include <boost/math/tools/minima.hpp>
+
 #include "../../ImageStreamIO/pixaccess.hpp"
 
 /** \defgroup dmWavefrontControl
@@ -1170,6 +1173,77 @@ struct gridSweep
 
             apply( 0.0 );
             out.amp = ( win.bestMetric < 0.0 ) ? finiteOrZero( win.bestAmp ) : 0.0;
+            return out;
+        }
+
+        apply( 0.0 );
+        return out;
+    }
+};
+
+/// Bounded Brent search matching magpyx `search_kind='brent'` / scipy `minimize_scalar(method='bounded')`.
+struct brentSweep
+{
+    double lo{ -0.05 };
+    double hi{ 0.05 };
+    double xatol{ 1e-5 }; ///< magpyx search_dict['tol'] default
+    unsigned maxIter{ 100 };
+
+    struct result
+    {
+        double amp{ 0 };
+        bool stopped{ false };
+        bool failed{ false };
+        unsigned nEval{ 0 };
+    };
+
+    template <typename Apply, typename Measure>
+    result run( Apply &&apply, Measure &&measure, const std::function<bool()> &stop = {} ) const
+    {
+        result out;
+        if( !( hi > lo ) )
+        {
+            return out;
+        }
+
+        int bits = static_cast<int>( std::lround( std::ceil( -std::log2( std::max( xatol, 1e-12 ) ) ) ) );
+        if( bits < 8 )
+        {
+            bits = 8;
+        }
+        if( bits > 50 )
+        {
+            bits = 50;
+        }
+        boost::uintmax_t max_it = maxIter;
+
+        struct abortRun
+        {
+            int code;
+        };
+        auto f = [&]( double x ) {
+            ++out.nEval;
+            if( stop && stop() )
+            {
+                throw abortRun{ -2 };
+            }
+            if( apply( x ) < 0 )
+            {
+                throw abortRun{ -1 };
+            }
+            return finiteOrZero( measure().metric );
+        };
+
+        try
+        {
+            const auto r = boost::math::tools::brent_find_minima( f, lo, hi, bits, max_it );
+            out.amp = finiteOrZero( r.first );
+        }
+        catch( const abortRun &a )
+        {
+            apply( 0.0 );
+            out.stopped = ( a.code == -2 );
+            out.failed = ( a.code == -1 );
             return out;
         }
 

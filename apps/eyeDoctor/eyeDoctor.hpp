@@ -117,7 +117,8 @@ class eyeDoctor : public MagAOXApp<true>
     double m_dmDelay{ 0.1 }; ///< Extra settle after the modes device reports current==target [s]
     double m_ampTol{ 1e-3 }; ///< |current_amps - target| wait tolerance
     double m_ampTimeout{ 10.0 }; ///< Seconds to wait for current_amps
-    std::string m_searchKind{ "fit" };
+    std::string m_searchKind{ "grid" }; ///< magpyx search_kind: grid or brent
+    std::string m_gridKind{ "fit" };    ///< magpyx grid_sweep skind: fit or mean (grid only)
     bool m_baseline{ true }; ///< Center each sweep on the live current_amps value
     bool m_randomize{ true }; ///< Shuffle modes inside each cluster
     bool m_ignoreFocus{ false }; ///< Skip the extra focus-first pass
@@ -299,6 +300,8 @@ class eyeDoctor : public MagAOXApp<true>
     std::vector<int> buildSequence( const std::vector<int> &modes ) const;
     static std::string modeElementName( int mode );
     static std::vector<int> parseModeSpec( const std::string &spec, int start, int end );
+    static int parseSearchKind( const std::string &in, std::string &searchKind, std::string &gridKind,
+                                std::string *err );
     int reloadDarkLib();
     int refreshDark( bool required );
     lina::DarkMatchFilter darkFilter() const;
@@ -385,7 +388,7 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.amp_timeout", "", "eyedoctor.amp_timeout", argType::Required, "eyedoctor", "amp_timeout",
                 false, "float", "Seconds to wait for current_amps after sending target_amps." );
     config.add( "eyedoctor.search_kind", "", "eyedoctor.search_kind", argType::Required, "eyedoctor", "search_kind",
-                false, "string", "fit (quadratic) or mean (argmin average)." );
+                false, "string", "magpyx search: grid (default, quadratic grid sweep) or brent." );
     config.add( "eyedoctor.baseline", "", "eyedoctor.baseline", argType::Required, "eyedoctor", "baseline", false,
                 "bool", "Center each sweep on the live current_amps value (magpyx default)." );
     config.add( "eyedoctor.randomize", "", "eyedoctor.randomize", argType::Required, "eyedoctor", "randomize", false,
@@ -426,6 +429,20 @@ void eyeDoctor::loadConfig()
     config( m_ampTol, "eyedoctor.amp_tol" );
     config( m_ampTimeout, "eyedoctor.amp_timeout" );
     config( m_searchKind, "eyedoctor.search_kind" );
+    {
+        std::string kind, gkind, err;
+        if( parseSearchKind( m_searchKind, kind, gkind, &err ) == 0 )
+        {
+            m_searchKind = kind;
+            m_gridKind = gkind;
+        }
+        else
+        {
+            log<text_log>( "eyedoctor.search_kind: " + err + "; using grid", logPrio::LOG_WARNING );
+            m_searchKind = "grid";
+            m_gridKind = "fit";
+        }
+    }
     config( m_baseline, "eyedoctor.baseline" );
     config( m_randomize, "eyedoctor.randomize" );
     config( m_ignoreFocus, "eyedoctor.ignore_focus" );
@@ -477,7 +494,7 @@ int eyeDoctor::appStartup()
                                 "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_ampTimeout, "amp_timeout", 0.1, 120, 0.1, "%0.1f",
                                 "current_amps wait timeout [s]", "algorithm" );
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_searchKind, "search_kind", "fit or mean", "algorithm" );
+    CREATE_REG_INDI_NEW_TEXT( m_indiP_searchKind, "search_kind", "grid or brent (magpyx)", "algorithm" );
 
     if( createStandardIndiToggleSw( m_indiP_baseline, "baseline", "Center sweep on current_amps", "algorithm" ) < 0 )
     {
@@ -1131,6 +1148,62 @@ std::vector<int> eyeDoctor::parseModeSpec( const std::string &spec, int start, i
     return modes;
 }
 
+int eyeDoctor::parseSearchKind( const std::string &in, std::string &searchKind, std::string &gridKind,
+                                std::string *err )
+{
+    std::string s = in;
+    auto a = s.find_first_not_of( " \t" );
+    auto b = s.find_last_not_of( " \t" );
+    if( a == std::string::npos )
+    {
+        if( err )
+        {
+            *err = "empty search_kind";
+        }
+        return -1;
+    }
+    s = s.substr( a, b - a + 1 );
+    for( char &c : s )
+    {
+        if( c >= 'A' && c <= 'Z' )
+        {
+            c = static_cast<char>( c - 'A' + 'a' );
+        }
+    }
+
+    // magpyx eye_doctor_comprehensive / dm_eye_doctor
+    if( s == "grid" )
+    {
+        searchKind = "grid";
+        gridKind = "fit";
+        return 0;
+    }
+    if( s == "brent" )
+    {
+        searchKind = "brent";
+        gridKind = "fit";
+        return 0;
+    }
+    // Old names were grid_sweep's skind, not magpyx search_kind.
+    if( s == "fit" )
+    {
+        searchKind = "grid";
+        gridKind = "fit";
+        return 0;
+    }
+    if( s == "mean" )
+    {
+        searchKind = "grid";
+        gridKind = "mean";
+        return 0;
+    }
+    if( err )
+    {
+        *err = "search_kind must be grid or brent";
+    }
+    return -1;
+}
+
 std::vector<int> eyeDoctor::requestedModes() const
 {
     return parseModeSpec( m_modesSpec, m_modeStart, m_modeEnd );
@@ -1567,7 +1640,8 @@ int eyeDoctor::optimizeMode( int mi, mx::improc::eigenImage<float> &camIm )
     const double lo = -0.5 * m_searchRange;
     const double hi = 0.5 * m_searchRange;
     log<text_log>( "Mode " + std::to_string( mi ) + ": scanning " + std::to_string( lo + baseval ) + " to " +
-                   std::to_string( hi + baseval ) + " (baseline " + std::to_string( baseval ) + ")" );
+                   std::to_string( hi + baseval ) + " (baseline " + std::to_string( baseval ) + ", search_kind=" +
+                   m_searchKind + ")" );
 
     double metric0 = 0;
     if( measureMetric( camIm, metric0 ) < 0 )
@@ -1580,78 +1654,108 @@ int eyeDoctor::optimizeMode( int mi, mx::improc::eigenImage<float> &camIm )
         return -1;
     }
 
-    dev::gridSweep sweep;
-    sweep.lo = lo;
-    sweep.hi = hi;
-    if( m_searchStep > 0.0 && m_searchRange > 0.0 )
-    {
-        sweep.nSteps = std::max( 3, static_cast<int>( std::lround( m_searchRange / m_searchStep ) ) + 1 );
-    }
-    else
-    {
-        sweep.nSteps = std::max( 3, m_nSteps );
-    }
-    sweep.nRepeats = std::max( 1, m_nRepeats );
-    sweep.kind = m_searchKind;
-    sweep.blankThresh = m_blankThresh;
-
-    const auto sw = sweep.run(
-        [&]( double a ) -> int {
-            const int rv = sendModeAndWait( mi, baseval + a );
-            if( rv < 0 )
-            {
-                return rv;
-            }
-            return 0;
-        },
-        [&]() -> dev::metricSample {
-            double m = 0;
-            if( measureMetric( camIm, m ) < 0 )
-            {
-                return { 1e6, 0.0 };
-            }
-            const double peak = camIm.size() > 0 ? static_cast<double>( camIm.maxCoeff() ) : 0.0;
-            return { m, peak };
-        },
-        [this]() { return stopping(); } );
-
-    if( stopping() || sw.stopped )
-    {
-        sendModeAndWait( mi, baseval );
-        return -2;
-    }
-
-    const double useAmp = baseval + dev::finiteOrZero( sw.amp );
-    if( m_searchKind == "fit" && !sw.usedFit )
-    {
-        std::string why = "mode " + std::to_string( mi ) + ": quadratic fit rejected";
-        if( sw.truncated )
+    auto applyAmp = [&]( double a ) -> int {
+        const int rv = sendModeAndWait( mi, baseval + a );
+        if( rv < 0 )
         {
-            why += ", truncated to " + std::to_string( sw.nGood ) + "/" + std::to_string( sw.nTotal ) +
-                   " on-camera samples";
+            return rv;
         }
-        if( sw.refined )
+        return 0;
+    };
+    auto measure = [&]() -> dev::metricSample {
+        double m = 0;
+        if( measureMetric( camIm, m ) < 0 )
         {
-            why += ", refined around best sample";
+            return { 1e6, 0.0 };
         }
-        if( dev::finiteOrZero( sw.amp ) == 0.0 )
+        const double peak = camIm.size() > 0 ? static_cast<double>( camIm.maxCoeff() ) : 0.0;
+        return { m, peak };
+    };
+    auto stopFn = [this]() { return stopping(); };
+
+    double deltaAmp = 0;
+    if( m_searchKind == "brent" )
+    {
+        dev::brentSweep sweep;
+        sweep.lo = lo;
+        sweep.hi = hi;
+        const auto sw = sweep.run( applyAmp, measure, stopFn );
+        if( stopping() || sw.stopped )
         {
-            why += ", leaving amp=" + std::to_string( baseval );
+            sendModeAndWait( mi, baseval );
+            return -2;
+        }
+        if( sw.failed )
+        {
+            log<text_log>( "mode " + std::to_string( mi ) + ": brent search failed, leaving amp=" +
+                               std::to_string( baseval ),
+                           logPrio::LOG_WARNING );
+            deltaAmp = 0;
         }
         else
         {
-            why += ", using best-sample amp=" + std::to_string( useAmp );
+            deltaAmp = dev::finiteOrZero( sw.amp );
+            log<text_log>( "mode " + std::to_string( mi ) + ": brent search nEval=" + std::to_string( sw.nEval ) );
         }
-        log<text_log>( why, logPrio::LOG_WARNING );
     }
-    else if( m_searchKind == "fit" && ( sw.truncated || sw.refined ) )
+    else
     {
-        log<text_log>( "mode " + std::to_string( mi ) + ": quadratic on " + std::to_string( sw.nGood ) + "/" +
-                           std::to_string( sw.nTotal ) + " on-camera samples" +
-                           ( sw.refined ? " after refine" : "" ),
-                       logPrio::LOG_INFO );
+        dev::gridSweep sweep;
+        sweep.lo = lo;
+        sweep.hi = hi;
+        if( m_searchStep > 0.0 && m_searchRange > 0.0 )
+        {
+            sweep.nSteps = std::max( 3, static_cast<int>( std::lround( m_searchRange / m_searchStep ) ) + 1 );
+        }
+        else
+        {
+            sweep.nSteps = std::max( 3, m_nSteps );
+        }
+        sweep.nRepeats = std::max( 1, m_nRepeats );
+        sweep.kind = m_gridKind;
+        sweep.blankThresh = m_blankThresh;
+
+        const auto sw = sweep.run( applyAmp, measure, stopFn );
+
+        if( stopping() || sw.stopped )
+        {
+            sendModeAndWait( mi, baseval );
+            return -2;
+        }
+
+        deltaAmp = dev::finiteOrZero( sw.amp );
+        if( m_gridKind == "fit" && !sw.usedFit )
+        {
+            std::string why = "mode " + std::to_string( mi ) + ": quadratic fit rejected";
+            if( sw.truncated )
+            {
+                why += ", truncated to " + std::to_string( sw.nGood ) + "/" + std::to_string( sw.nTotal ) +
+                       " on-camera samples";
+            }
+            if( sw.refined )
+            {
+                why += ", refined around best sample";
+            }
+            if( deltaAmp == 0.0 )
+            {
+                why += ", leaving amp=" + std::to_string( baseval );
+            }
+            else
+            {
+                why += ", using best-sample amp=" + std::to_string( baseval + deltaAmp );
+            }
+            log<text_log>( why, logPrio::LOG_WARNING );
+        }
+        else if( m_gridKind == "fit" && ( sw.truncated || sw.refined ) )
+        {
+            log<text_log>( "mode " + std::to_string( mi ) + ": quadratic on " + std::to_string( sw.nGood ) + "/" +
+                               std::to_string( sw.nTotal ) + " on-camera samples" +
+                               ( sw.refined ? " after refine" : "" ),
+                           logPrio::LOG_INFO );
+        }
     }
 
+    const double useAmp = baseval + deltaAmp;
     if( sendModeAndWait( mi, useAmp ) < 0 )
     {
         setStatus( "failed to command " + m_modesDevice + " mode " + std::to_string( mi ) );
@@ -2178,12 +2282,22 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_searchKind )( const pcf::IndiProperty 
     {
         return log<software_error, -1>( { __FILE__, __LINE__ } );
     }
-    if( target != "fit" && target != "mean" )
+    std::string kind;
+    std::string gkind;
+    std::string err;
+    if( parseSearchKind( target, kind, gkind, &err ) < 0 )
     {
-        log<text_log>( "search_kind must be fit or mean", logPrio::LOG_ERROR );
+        log<text_log>( err, logPrio::LOG_ERROR );
         return -1;
     }
-    m_searchKind = target;
+    if( target == "fit" || target == "mean" )
+    {
+        log<text_log>( "search_kind=" + target + " is magpyx grid_sweep skind, not eye_doctor search_kind; "
+                       "using search_kind=grid with that quadratic/mean extractor",
+                       logPrio::LOG_NOTICE );
+    }
+    m_searchKind = kind;
+    m_gridKind = gkind;
     updateIfChanged( m_indiP_searchKind, "current", m_searchKind );
     return 0;
 }
