@@ -95,7 +95,6 @@ class eyeDoctor : public MagAOXApp<true>
     /** \name Algorithm parameters (magpyx eye_doctor_comprehensive / dm_eye_doctor)
       *@{
       */
-    std::string m_modesSpec; ///< Optional magpyx list, e.g. "2...10,12". Empty = mode_start..mode_end.
     int m_modeStart{ 2 };
     int m_modeEnd{ 10 };
     int m_focusModeIndex{ 2 }; ///< magpyx focus-first mode (default 2)
@@ -158,7 +157,7 @@ class eyeDoctor : public MagAOXApp<true>
     std::atomic<bool> m_busy{ false };
     std::string m_status{ "idle" };
     int m_currentMode{ -1 };
-    int m_nModesLoaded{ 0 };
+    int m_modesMax{ 0 };
     double m_lastAmp{ 0 };
     double m_lastMetric{ 0 };
     int m_satWarnedMode{ -2 };
@@ -187,8 +186,6 @@ class eyeDoctor : public MagAOXApp<true>
     pcf::IndiProperty m_indiP_darkLibPath;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_darkLibPath );
 
-    pcf::IndiProperty m_indiP_modesSpec;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modesSpec );
     pcf::IndiProperty m_indiP_modeStart;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modeStart );
     pcf::IndiProperty m_indiP_modeEnd;
@@ -253,7 +250,7 @@ class eyeDoctor : public MagAOXApp<true>
 
     pcf::IndiProperty m_indiP_status;
     pcf::IndiProperty m_indiP_currentMode;
-    pcf::IndiProperty m_indiP_nModesLoaded;
+    pcf::IndiProperty m_indiP_modesMax;
     pcf::IndiProperty m_indiP_optAmp;
     pcf::IndiProperty m_indiP_metric;
     pcf::IndiProperty m_indiP_lastFlat;
@@ -299,7 +296,6 @@ class eyeDoctor : public MagAOXApp<true>
     std::vector<int> allowedModes( const std::vector<int> &req, int nAvail, bool *truncated ) const;
     std::vector<int> buildSequence( const std::vector<int> &modes ) const;
     static std::string modeElementName( int mode );
-    static std::vector<int> parseModeSpec( const std::string &spec, int start, int end );
     static int parseSearchKind( const std::string &in, std::string &searchKind, std::string &gridKind,
                                 std::string *err );
     int reloadDarkLib();
@@ -344,8 +340,6 @@ void eyeDoctor::setupConfig()
                 "darkCtrl library directory (dark_metadata.txt + dark_NNN.fits)." );
     config.add( "eyedoctor.exptime_tol", "", "eyedoctor.exptime_tol", argType::Required, "eyedoctor", "exptime_tol",
                 false, "float", "Max |live-library| exptime difference [s] when picking a dark." );
-    config.add( "eyedoctor.modes", "", "eyedoctor.modes", argType::Required, "eyedoctor", "modes", false, "string",
-                "Optional magpyx mode list (e.g. 2...10,12). Empty uses mode_start..mode_end." );
     config.add( "eyedoctor.mode_start", "", "eyedoctor.mode_start", argType::Required, "eyedoctor", "mode_start", false,
                 "int", "First 0-based mode index when modes is empty." );
     config.add( "eyedoctor.mode_end", "", "eyedoctor.mode_end", argType::Required, "eyedoctor", "mode_end", false, "int",
@@ -407,7 +401,6 @@ void eyeDoctor::loadConfig()
     config( m_flatDir, "eyedoctor.flat_dir" );
     config( m_darkLibPath, "eyedoctor.dark_lib_path" );
     config( m_exptimeTol, "eyedoctor.exptime_tol" );
-    config( m_modesSpec, "eyedoctor.modes" );
     config( m_modeStart, "eyedoctor.mode_start" );
     config( m_modeEnd, "eyedoctor.mode_end" );
     config( m_focusModeIndex, "eyedoctor.focus_mode_index" );
@@ -458,7 +451,6 @@ int eyeDoctor::appStartup()
     CREATE_REG_INDI_NEW_TEXT( m_indiP_flatDir, "flat_dir", "Directory for saved flat FITS", "flat" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_darkLibPath, "dark_lib_path", "darkCtrl library directory", "paths" );
 
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_modesSpec, "modes", "Mode list (2...10,12) or empty for start/end", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeStart, "mode_start", 0, 10000, 1, "%d", "First mode index", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeEnd, "mode_end", 0, 10000, 1, "%d", "Last mode index", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_focusModeIndex, "focus_mode_index", 0, 10000, 1, "%d", "Focus-first mode index",
@@ -542,9 +534,9 @@ int eyeDoctor::appStartup()
     m_indiP_currentMode.add( pcf::IndiElement( "current" ) );
     m_indiP_currentMode["current"].set( -1.0 );
 
-    REG_INDI_NEWPROP_NOCB( m_indiP_nModesLoaded, "n_modes_loaded", pcf::IndiProperty::Number );
-    m_indiP_nModesLoaded.add( pcf::IndiElement( "current" ) );
-    m_indiP_nModesLoaded["current"].set( 0.0 );
+    REG_INDI_NEWPROP_NOCB( m_indiP_modesMax, "modes_max", pcf::IndiProperty::Number );
+    m_indiP_modesMax.add( pcf::IndiElement( "current" ) );
+    m_indiP_modesMax["current"].set( 0.0 );
 
     REG_INDI_NEWPROP_NOCB( m_indiP_optAmp, "opt_amp", pcf::IndiProperty::Number );
     m_indiP_optAmp.add( pcf::IndiElement( "current" ) );
@@ -576,8 +568,6 @@ int eyeDoctor::appStartup()
     m_indiP_flatDir["target"].setValue( m_flatDir );
     m_indiP_darkLibPath["current"].setValue( m_darkLibPath );
     m_indiP_darkLibPath["target"].setValue( m_darkLibPath );
-    m_indiP_modesSpec["current"].setValue( m_modesSpec );
-    m_indiP_modesSpec["target"].setValue( m_modesSpec );
     m_indiP_modeStart["current"].setValue( m_modeStart );
     m_indiP_modeStart["target"].setValue( m_modeStart );
     m_indiP_modeEnd["current"].setValue( m_modeEnd );
@@ -1079,71 +1069,16 @@ int eyeDoctor::resetToZero()
     return 0;
 }
 
-std::vector<int> eyeDoctor::parseModeSpec( const std::string &spec, int start, int end )
+std::vector<int> eyeDoctor::requestedModes() const
 {
     std::vector<int> modes;
-    auto trim = []( std::string s ) {
-        const auto a = s.find_first_not_of( " \t" );
-        if( a == std::string::npos )
-        {
-            return std::string();
-        }
-        const auto b = s.find_last_not_of( " \t" );
-        return s.substr( a, b - a + 1 );
-    };
-
-    const std::string s = trim( spec );
-    if( s.empty() )
+    if( m_modeEnd < m_modeStart )
     {
-        if( end < start )
-        {
-            return modes;
-        }
-        for( int i = start; i <= end; ++i )
-        {
-            modes.push_back( i );
-        }
         return modes;
     }
-
-    size_t pos = 0;
-    while( pos < s.size() )
+    for( int i = m_modeStart; i <= m_modeEnd; ++i )
     {
-        size_t comma = s.find( ',', pos );
-        if( comma == std::string::npos )
-        {
-            comma = s.size();
-        }
-        const std::string tok = trim( s.substr( pos, comma - pos ) );
-        pos = comma + 1;
-        if( tok.empty() )
-        {
-            continue;
-        }
-        const size_t dots = tok.find( "..." );
-        if( dots != std::string::npos )
-        {
-            const int a = std::atoi( tok.substr( 0, dots ).c_str() );
-            const int b = std::atoi( tok.substr( dots + 3 ).c_str() );
-            if( a > b )
-            {
-                for( int i = a; i >= b; --i )
-                {
-                    modes.push_back( i );
-                }
-            }
-            else
-            {
-                for( int i = a; i <= b; ++i )
-                {
-                    modes.push_back( i );
-                }
-            }
-        }
-        else
-        {
-            modes.push_back( std::atoi( tok.c_str() ) );
-        }
+        modes.push_back( i );
     }
     return modes;
 }
@@ -1202,11 +1137,6 @@ int eyeDoctor::parseSearchKind( const std::string &in, std::string &searchKind, 
         *err = "search_kind must be grid or brent";
     }
     return -1;
-}
-
-std::vector<int> eyeDoctor::requestedModes() const
-{
-    return parseModeSpec( m_modesSpec, m_modeStart, m_modeEnd );
 }
 
 std::vector<int> eyeDoctor::allowedModes( const std::vector<int> &req, int nAvail, bool *truncated ) const
@@ -1799,16 +1729,17 @@ int eyeDoctor::runOptimization()
     }
 
     const int nAvail = nRemoteModes();
-    m_nModesLoaded = nAvail;
-    updateIfChanged( m_indiP_nModesLoaded, "current", static_cast<double>( m_nModesLoaded ) );
-    log<text_log>( "Number of modes available on " + m_modesDevice + ": " + std::to_string( nAvail ) );
+    m_modesMax = nAvail;
+    updateIfChanged( m_indiP_modesMax, "current", static_cast<double>( m_modesMax ) );
+    log<text_log>( "modes_max on " + m_modesDevice + ": " + std::to_string( nAvail ) );
 
     bool truncated = false;
     const std::vector<int> allowed = allowedModes( requestedModes(), nAvail, &truncated );
     if( truncated )
     {
-        log<text_log>( "requested modes outside 0.." + std::to_string( nAvail - 1 ) + " on " + m_modesDevice +
-                           "; not correcting those modes",
+        log<text_log>( "mode_start/mode_end includes indices outside 0.." + std::to_string( nAvail - 1 ) +
+                           " (modes_max=" + std::to_string( nAvail ) + " on " + m_modesDevice +
+                           "); skipping those modes",
                        logPrio::LOG_WARNING );
     }
     if( allowed.empty() )
@@ -1827,7 +1758,7 @@ int eyeDoctor::runOptimization()
     }
 
     std::ostringstream ms;
-    ms << "Optimizing modes:";
+    ms << "Optimizing " << allowed.size() << " mode" << ( allowed.size() == 1 ? "" : "s" ) << ":";
     for( int m : allowed )
     {
         ms << " " << m;
@@ -1988,19 +1919,6 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_darkLibPath )( const pcf::IndiProperty
     return 0;
 }
 
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modesSpec )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modesSpec, ipRecv );
-    std::string target;
-    if( indiTargetUpdate( m_indiP_modesSpec, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    m_modesSpec = target;
-    updateIfChanged( m_indiP_modesSpec, "current", m_modesSpec );
-    return 0;
-}
-
 INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modeStart )( const pcf::IndiProperty &ipRecv )
 {
     INDI_VALIDATE_CALLBACK_PROPS( m_indiP_modeStart, ipRecv );
@@ -2011,6 +1929,12 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modeStart )( const pcf::IndiProperty &
     }
     m_modeStart = target;
     updateIfChanged( m_indiP_modeStart, "current", m_modeStart );
+    if( m_modesMax > 0 && ( m_modeStart < 0 || m_modeStart >= m_modesMax ) )
+    {
+        log<text_log>( "mode_start=" + std::to_string( m_modeStart ) + " is outside 0.." +
+                           std::to_string( m_modesMax - 1 ) + " (modes_max from " + m_modesDevice + ")",
+                       logPrio::LOG_WARNING );
+    }
     return 0;
 }
 
@@ -2024,6 +1948,12 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_modeEnd )( const pcf::IndiProperty &ip
     }
     m_modeEnd = target;
     updateIfChanged( m_indiP_modeEnd, "current", m_modeEnd );
+    if( m_modesMax > 0 && ( m_modeEnd < 0 || m_modeEnd >= m_modesMax ) )
+    {
+        log<text_log>( "mode_end=" + std::to_string( m_modeEnd ) + " is outside 0.." +
+                           std::to_string( m_modesMax - 1 ) + " (modes_max from " + m_modesDevice + ")",
+                       logPrio::LOG_WARNING );
+    }
     return 0;
 }
 
@@ -2546,9 +2476,9 @@ INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteAmps )( const pcf::IndiProperty 
         {
             m_remoteAmps[static_cast<size_t>( p.first )] = p.second;
         }
-        m_nModesLoaded = static_cast<int>( m_remoteAmps.size() );
+        m_modesMax = static_cast<int>( m_remoteAmps.size() );
     }
-    updateIfChanged( m_indiP_nModesLoaded, "current", static_cast<double>( m_nModesLoaded ) );
+    updateIfChanged( m_indiP_modesMax, "current", static_cast<double>( m_modesMax ) );
     return 0;
 }
 
