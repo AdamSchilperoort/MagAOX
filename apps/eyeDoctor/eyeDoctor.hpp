@@ -1,11 +1,11 @@
 /** \file eyeDoctor.hpp
   * \brief MagAO-X Eye Doctor: modal DM grid-search to maximize PSF core flux.
   *
-  * C++ port of magpyx `eye_doctor_comprehensive`. Commands a remote INDI
-  * modeset device (typically a `dmMode` instance such as `alpaoModes`) via
-  * `target_amps` / `current_amps`. That app owns the modeset, converts
-  * amplitudes to a DM shape, and writes the cacao channel. This app only
-  * sends mode amplitudes and measures PSF core flux on a camera shmim.
+  * Commands a remote INDI modeset device (typically a `dmMode` instance such
+  * as `alpaoModes`) via `target_amps` / `current_amps`. That app owns the
+  * modeset, converts amplitudes to a DM shape, and writes the cacao channel.
+  * This app only sends mode amplitudes and measures PSF core flux on a
+  * camera shmim.
   *
   * \ingroup eyeDoctor_files
   */
@@ -58,16 +58,13 @@ namespace app
 {
 
 /// MagAO-X Eye Doctor application
-/** INDI front-end for magpyx `eye_doctor_comprehensive`.
+/** Grid-search modal amplitudes through an INDI modeset device.
   *
   * Hardware:
   *  - \c modes_device : INDI dmMode app (`alpaoModes`, `wooferModes`, ...)
   *  - \c shm_cam      : WFS / science-camera image shmim
   *  - \c cam_name     : INDI device of that camera
   *  - \c shm_dm_flat / \c shm_dm_sum : optional, used only by save_flat
-  *
-  * Equivalent CLI:
-  * `dm_eye_doctor <port> alpaoModes camsci 8 2...10 0.1 --skip 1`
   *
   * \ingroup eyeDoctor
   */
@@ -92,12 +89,12 @@ class eyeDoctor : public MagAOXApp<true>
     std::string m_darkLibPath; ///< darkCtrl library (dark_metadata.txt + dark_NNN.fits)
     ///@}
 
-    /** \name Algorithm parameters (magpyx eye_doctor_comprehensive / dm_eye_doctor)
+    /** \name Algorithm parameters
       *@{
       */
     int m_modeStart{ 2 };
     int m_modeEnd{ 10 };
-    int m_focusModeIndex{ 2 }; ///< magpyx focus-first mode (default 2)
+    int m_focusModeIndex{ 2 }; ///< Extra first pass when randomize is on
     double m_coreRadius{ 8.0 };
     double m_searchRange{ 0.1 }; ///< Total span; sweep is [-range/2, +range/2] about baseline
     double m_searchStep{ 0.0 };  ///< Amplitude spacing; 0 = use n_steps
@@ -116,8 +113,8 @@ class eyeDoctor : public MagAOXApp<true>
     double m_dmDelay{ 0.1 }; ///< Extra settle after the modes device reports current==target [s]
     double m_ampTol{ 1e-3 }; ///< |current_amps - target| wait tolerance
     double m_ampTimeout{ 10.0 }; ///< Seconds to wait for current_amps
-    std::string m_searchKind{ "grid" }; ///< magpyx search_kind: grid or brent
-    std::string m_gridKind{ "fit" };    ///< magpyx grid_sweep skind: fit or mean (grid only)
+    std::string m_searchKind{ "grid" }; ///< grid or brent
+    std::string m_gridKind{ "fit" };    ///< grid minimum: quadratic fit or mean argmin
     bool m_baseline{ true }; ///< Center each sweep on the live current_amps value
     bool m_randomize{ true }; ///< Shuffle modes inside each cluster
     bool m_ignoreFocus{ false }; ///< Skip the extra focus-first pass
@@ -285,7 +282,7 @@ class eyeDoctor : public MagAOXApp<true>
     int saveFlat();
     int abortAndZero();
     int resetToZero();
-    int zeroAllModes();
+    int zeroModeRange( int start, int end );
     int sendModeAmp( int mode, double amp );
     int waitModeAmp( int mode, double amp );
     int sendModeAndWait( int mode, double amp );
@@ -311,6 +308,7 @@ class eyeDoctor : public MagAOXApp<true>
     void setRunToggle( bool on, pcf::IndiProperty::PropertyStateType st );
     void clearRequest( pcf::IndiProperty &p );
     bool stopping();
+    bool shuttingDown();
     static int ensureDirectory( const std::string &path );
     static std::string timestampNow();
 };
@@ -341,12 +339,12 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.exptime_tol", "", "eyedoctor.exptime_tol", argType::Required, "eyedoctor", "exptime_tol",
                 false, "float", "Max |live-library| exptime difference [s] when picking a dark." );
     config.add( "eyedoctor.mode_start", "", "eyedoctor.mode_start", argType::Required, "eyedoctor", "mode_start", false,
-                "int", "First 0-based mode index when modes is empty." );
+                "int", "First 0-based mode index to optimize." );
     config.add( "eyedoctor.mode_end", "", "eyedoctor.mode_end", argType::Required, "eyedoctor", "mode_end", false, "int",
-                "Last 0-based mode index when modes is empty (inclusive)." );
+                "Last 0-based mode index to optimize (inclusive)." );
     config.add( "eyedoctor.focus_mode_index", "", "eyedoctor.focus_mode_index", argType::Required, "eyedoctor",
                 "focus_mode_index", false, "int",
-                "Mode optimized first unless ignore_focus (magpyx default 2)." );
+                "Mode optimized first when randomize is on, unless ignore_focus." );
     config.add( "eyedoctor.core_radius", "", "eyedoctor.core_radius", argType::Required, "eyedoctor", "core_radius",
                 false, "float", "PSF core radius [pixels] for coresum metric." );
     config.add( "eyedoctor.search_range", "", "eyedoctor.search_range", argType::Required, "eyedoctor", "search_range",
@@ -358,9 +356,9 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.n_repeats", "", "eyedoctor.n_repeats", argType::Required, "eyedoctor", "n_repeats", false,
                 "int", "Number of sweep repeats averaged / jointly fit." );
     config.add( "eyedoctor.n_cluster", "", "eyedoctor.n_cluster", argType::Required, "eyedoctor", "n_cluster", false,
-                "int", "Modes per shuffled cluster (magpyx ncluster, default 5)." );
+                "int", "Modes per shuffled cluster when randomize is on." );
     config.add( "eyedoctor.n_cluster_repeat", "", "eyedoctor.n_cluster_repeat", argType::Required, "eyedoctor",
-                "n_cluster_repeat", false, "int", "Times to repeat each cluster (magpyx --nclusterrepeats)." );
+                "n_cluster_repeat", false, "int", "Times to repeat each cluster when randomize is on." );
     config.add( "eyedoctor.n_seq_repeat", "", "eyedoctor.n_seq_repeat", argType::Required, "eyedoctor", "n_seq_repeat",
                 false, "int", "Repeat the full mode sequence this many times." );
     config.add( "eyedoctor.n_images", "", "eyedoctor.n_images", argType::Required, "eyedoctor", "n_images", false,
@@ -382,9 +380,9 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.amp_timeout", "", "eyedoctor.amp_timeout", argType::Required, "eyedoctor", "amp_timeout",
                 false, "float", "Seconds to wait for current_amps after sending target_amps." );
     config.add( "eyedoctor.search_kind", "", "eyedoctor.search_kind", argType::Required, "eyedoctor", "search_kind",
-                false, "string", "magpyx search: grid (default, quadratic grid sweep) or brent." );
+                false, "string", "grid (quadratic grid sweep) or brent (bounded 1-D search)." );
     config.add( "eyedoctor.baseline", "", "eyedoctor.baseline", argType::Required, "eyedoctor", "baseline", false,
-                "bool", "Center each sweep on the live current_amps value (magpyx default)." );
+                "bool", "Center each sweep on the live current_amps value." );
     config.add( "eyedoctor.randomize", "", "eyedoctor.randomize", argType::Required, "eyedoctor", "randomize", false,
                 "bool", "Shuffle modes inside each cluster." );
     config.add( "eyedoctor.ignore_focus", "", "eyedoctor.ignore_focus", argType::Required, "eyedoctor", "ignore_focus",
@@ -486,7 +484,7 @@ int eyeDoctor::appStartup()
                                 "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_ampTimeout, "amp_timeout", 0.1, 120, 0.1, "%0.1f",
                                 "current_amps wait timeout [s]", "algorithm" );
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_searchKind, "search_kind", "grid or brent (magpyx)", "algorithm" );
+    CREATE_REG_INDI_NEW_TEXT( m_indiP_searchKind, "search_kind", "grid or brent", "algorithm" );
 
     if( createStandardIndiToggleSw( m_indiP_baseline, "baseline", "Center sweep on current_amps", "algorithm" ) < 0 )
     {
@@ -770,8 +768,12 @@ void eyeDoctor::workerExec()
 
 bool eyeDoctor::stopping()
 {
-    return m_workerShutdown.load() || !m_runRequested.load() || m_abortRequested.load() ||
-           m_resetRequested.load() || shutdown() != 0;
+    return shuttingDown() || !m_runRequested.load() || m_abortRequested.load() || m_resetRequested.load();
+}
+
+bool eyeDoctor::shuttingDown()
+{
+    return m_workerShutdown.load() || shutdown() != 0;
 }
 
 void eyeDoctor::setStatus( const std::string &s )
@@ -882,7 +884,7 @@ int eyeDoctor::waitForModesDevice()
     }
     const auto t0 = std::chrono::steady_clock::now();
     const double timeout = std::max( 0.1, m_ampTimeout );
-    while( !stopping() )
+    while( !shuttingDown() )
     {
         if( nRemoteModes() > 0 )
         {
@@ -974,19 +976,27 @@ int eyeDoctor::sendModeAndWait( int mode, double amp )
     return -1;
 }
 
-int eyeDoctor::zeroAllModes()
+int eyeDoctor::zeroModeRange( int start, int end )
 {
-    const int n = nRemoteModes();
-    if( n <= 0 )
+    const int nAvail = nRemoteModes();
+    if( nAvail <= 0 )
     {
         setStatus( "modes device has not published current_amps" );
+        return -1;
+    }
+
+    const int lo = std::max( 0, std::min( start, end ) );
+    const int hi = std::min( nAvail - 1, std::max( start, end ) );
+    if( hi < lo )
+    {
+        setStatus( "invalid mode_start/mode_end for reset" );
         return -1;
     }
 
     pcf::IndiProperty ip( pcf::IndiProperty::Number );
     ip.setDevice( m_modesDevice );
     ip.setName( "target_amps" );
-    for( int i = 0; i < n; ++i )
+    for( int i = lo; i <= hi; ++i )
     {
         const std::string el = modeElementName( i );
         ip.add( pcf::IndiElement( el ) );
@@ -1000,18 +1010,18 @@ int eyeDoctor::zeroAllModes()
 
     const auto t0 = std::chrono::steady_clock::now();
     const double timeout = std::max( 0.1, m_ampTimeout );
-    while( !stopping() )
+    while( !shuttingDown() )
     {
         bool ok = true;
         {
             std::lock_guard<std::mutex> lock( m_modesMutex );
-            if( static_cast<int>( m_remoteAmps.size() ) < n )
+            if( static_cast<int>( m_remoteAmps.size() ) <= hi )
             {
                 ok = false;
             }
             else
             {
-                for( int i = 0; i < n; ++i )
+                for( int i = lo; i <= hi; ++i )
                 {
                     if( std::fabs( m_remoteAmps[static_cast<size_t>( i )] ) > m_ampTol )
                     {
@@ -1025,13 +1035,16 @@ int eyeDoctor::zeroAllModes()
         {
             m_currentMode = -1;
             updateIfChanged( m_indiP_currentMode, "current", -1.0 );
+            log<text_log>( "zeroed " + m_modesDevice + " modes " + std::to_string( lo ) + ".." +
+                           std::to_string( hi ) );
             return 0;
         }
         const double elapsed =
             std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
         if( elapsed > timeout )
         {
-            setStatus( "timeout waiting for " + m_modesDevice + " current_amps to reach 0" );
+            setStatus( "timeout waiting for " + m_modesDevice + " current_amps[" + std::to_string( lo ) +
+                       ".." + std::to_string( hi ) + "] to reach 0" );
             return -1;
         }
         mx::sys::milliSleep( 5 );
@@ -1046,11 +1059,12 @@ int eyeDoctor::abortAndZero()
     {
         return -1;
     }
-    if( zeroAllModes() < 0 )
+    if( zeroModeRange( m_modeStart, m_modeEnd ) < 0 )
     {
         return -1;
     }
-    log<text_log>( "aborted: zeroed " + m_modesDevice + " target_amps" );
+    log<text_log>( "aborted: zeroed " + m_modesDevice + " modes " + std::to_string( m_modeStart ) + ".." +
+                   std::to_string( m_modeEnd ) );
     return 0;
 }
 
@@ -1061,11 +1075,12 @@ int eyeDoctor::resetToZero()
     {
         return -1;
     }
-    if( zeroAllModes() < 0 )
+    if( zeroModeRange( m_modeStart, m_modeEnd ) < 0 )
     {
         return -1;
     }
-    log<text_log>( "reset_to_zero: wrote 0 to " + m_modesDevice + ".target_amps" );
+    log<text_log>( "reset_to_zero: wrote 0 to " + m_modesDevice + " modes " + std::to_string( m_modeStart ) +
+                   ".." + std::to_string( m_modeEnd ) );
     return 0;
 }
 
@@ -1106,7 +1121,6 @@ int eyeDoctor::parseSearchKind( const std::string &in, std::string &searchKind, 
         }
     }
 
-    // magpyx eye_doctor_comprehensive / dm_eye_doctor
     if( s == "grid" )
     {
         searchKind = "grid";
@@ -1119,7 +1133,6 @@ int eyeDoctor::parseSearchKind( const std::string &in, std::string &searchKind, 
         gridKind = "fit";
         return 0;
     }
-    // Old names were grid_sweep's skind, not magpyx search_kind.
     if( s == "fit" )
     {
         searchKind = "grid";
@@ -1168,9 +1181,19 @@ std::vector<int> eyeDoctor::buildSequence( const std::vector<int> &modes ) const
     {
         return seq;
     }
+    const int nsr = std::max( 1, m_nSeqRepeat );
+
+    if( !m_randomize )
+    {
+        for( int s = 0; s < nsr; ++s )
+        {
+            seq.insert( seq.end(), modes.begin(), modes.end() );
+        }
+        return seq;
+    }
+
     const int ncl = std::max( 1, m_nCluster );
     const int ncr = std::max( 1, m_nClusterRepeat );
-    const int nsr = std::max( 1, m_nSeqRepeat );
     static thread_local std::mt19937 rng{ std::random_device{}() };
 
     for( int s = 0; s < nsr; ++s )
@@ -1184,7 +1207,7 @@ std::vector<int> eyeDoctor::buildSequence( const std::vector<int> &modes ) const
             for( int r = 0; r < ncr; ++r )
             {
                 std::vector<int> cur = cluster;
-                if( m_randomize && cur.size() > 1 )
+                if( cur.size() > 1 )
                 {
                     std::shuffle( cur.begin(), cur.end(), rng );
                 }
@@ -1529,7 +1552,7 @@ int eyeDoctor::saveFlat()
 
     if( waitForModesDevice() == 0 )
     {
-        if( zeroAllModes() < 0 )
+        if( zeroModeRange( m_modeStart, m_modeEnd ) < 0 )
         {
             log<text_log>( "saved flat but failed to zero " + m_modesDevice, logPrio::LOG_WARNING );
         }
@@ -1750,15 +1773,25 @@ int eyeDoctor::runOptimization()
 
     if( !m_baseline )
     {
-        log<text_log>( "baseline off: resetting all mode coefficients to 0" );
-        if( zeroAllModes() < 0 )
+        log<text_log>( "baseline off: resetting modes " + std::to_string( m_modeStart ) + ".." +
+                       std::to_string( m_modeEnd ) + " to 0" );
+        if( zeroModeRange( m_modeStart, m_modeEnd ) < 0 )
         {
             return -1;
         }
     }
 
     std::ostringstream ms;
-    ms << "Optimizing " << allowed.size() << " mode" << ( allowed.size() == 1 ? "" : "s" ) << ":";
+    ms << "Optimizing " << allowed.size() << " mode" << ( allowed.size() == 1 ? "" : "s" );
+    if( m_randomize )
+    {
+        ms << " (randomize on, clustered)";
+    }
+    else
+    {
+        ms << " in index order " << allowed.front() << ".." << allowed.back();
+    }
+    ms << ":";
     for( int m : allowed )
     {
         ms << " " << m;
@@ -1772,7 +1805,7 @@ int eyeDoctor::runOptimization()
 
     mx::improc::eigenImage<float> camIm;
 
-    const bool focusFirst = !m_ignoreFocus && allowed.size() > 1;
+    const bool focusFirst = m_randomize && !m_ignoreFocus && allowed.size() > 1;
     if( focusFirst )
     {
         bool haveFocus = false;
@@ -1797,6 +1830,16 @@ int eyeDoctor::runOptimization()
     }
 
     const std::vector<int> seq = buildSequence( allowed );
+    if( m_randomize )
+    {
+        std::ostringstream os;
+        os << "randomized sequence:";
+        for( int m : seq )
+        {
+            os << " " << m;
+        }
+        log<text_log>( os.str() );
+    }
     for( size_t i = 0; i < seq.size() && !stopping(); ++i )
     {
         const int mi = seq[i];
@@ -2220,12 +2263,6 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_searchKind )( const pcf::IndiProperty 
         log<text_log>( err, logPrio::LOG_ERROR );
         return -1;
     }
-    if( target == "fit" || target == "mean" )
-    {
-        log<text_log>( "search_kind=" + target + " is magpyx grid_sweep skind, not eye_doctor search_kind; "
-                       "using search_kind=grid with that quadratic/mean extractor",
-                       logPrio::LOG_NOTICE );
-    }
     m_searchKind = kind;
     m_gridKind = gkind;
     updateIfChanged( m_indiP_searchKind, "current", m_searchKind );
@@ -2272,6 +2309,7 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_randomize )( const pcf::IndiProperty &
     m_randomize = ( ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On );
     updateSwitchIfChanged( m_indiP_randomize, "toggle", m_randomize ? pcf::IndiElement::On : pcf::IndiElement::Off,
                            m_randomize ? pcf::IndiProperty::Ok : pcf::IndiProperty::Idle );
+    log<text_log>( std::string( "randomize " ) + ( m_randomize ? "on (shuffle clusters)" : "off (index order)" ) );
     return 0;
 }
 

@@ -498,7 +498,7 @@ class modeCube
         return mx::sigproc::zernikeBasis<mx::improc::eigenCube<float>, double>( modes, -1, minNoll );
     }
 
-    /// Sylvester Hadamard modes on a circular actuator mask (lina / magpyx convention).
+    /// Sylvester Hadamard modes on a circular actuator mask.
     /** Valid actuators: hypot(x,y) < min(size)/2 + 0.5. Number of planes is the next power of two
       * of the valid-actuator count. Each plane is a 2D map in milkImage layout.
       */
@@ -630,7 +630,7 @@ inline int readFitsImage( const std::string &path, mx::improc::eigenImage<float>
     }
 }
 
-/// PSF / image metrics. Core-sum matches magpyx get_image_coresum (negative for minimization).
+/// PSF / image metrics. coreSum is negative core flux (minimize to maximize Strehl proxy).
 struct psfMetrics
 {
     static mx::improc::eigenImage<float> subtractEdgeMedian( const mx::improc::eigenImage<float> &image )
@@ -711,7 +711,7 @@ struct psfMetrics
     }
 
     /// Negative core sum (minimize this to maximize PSF core flux).
-    /** If \p cenx / \p ceny are negative, peak + COM refinement is used (magpyx).
+    /** If \p cenx / \p ceny are negative, the peak is used with a COM refinement.
       */
     static double coreSum( const mx::improc::eigenImage<float> &image,
                            double radius,
@@ -1181,12 +1181,12 @@ struct gridSweep
     }
 };
 
-/// Bounded Brent search matching magpyx `search_kind='brent'` / scipy `minimize_scalar(method='bounded')`.
+/// Bounded 1-D Brent search over mode amplitude.
 struct brentSweep
 {
     double lo{ -0.05 };
     double hi{ 0.05 };
-    double xatol{ 1e-5 }; ///< magpyx search_dict['tol'] default
+    double xatol{ 1e-5 };
     unsigned maxIter{ 100 };
 
     struct result
