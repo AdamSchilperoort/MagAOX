@@ -21,8 +21,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
-#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <random>
@@ -40,7 +40,6 @@
 #include "../../libMagAOX/libMagAOX.hpp"
 #include "../../magaox_git_version.h"
 #include "../../libMagAOX/app/dev/dmWavefrontControl.hpp"
-#include <lina/dark_library.h>
 
 /** \defgroup eyeDoctor
   * \brief Modal DM PSF optimization (eye doctor)
@@ -63,7 +62,7 @@ namespace app
   * Hardware:
   *  - \c modes_device : INDI dmMode app (`alpaoModes`, `wooferModes`, ...)
   *  - \c shm_cam      : WFS / science-camera image shmim
-  *  - \c cam_name     : INDI device of that camera
+  *  - \c cam_name     : INDI camera device; only \c exptime is requested
   *  - \c shm_dm_flat / \c shm_dm_sum : optional, used only by save_flat
   *
   * \ingroup eyeDoctor
@@ -86,7 +85,6 @@ class eyeDoctor : public MagAOXApp<true>
     std::string m_camName{ "camsci" };
     std::string m_flatDir{ "/opt/MagAOX/calib/dm/bmc_1k/flats" };
     std::string m_lastFlatPath;
-    std::string m_darkLibPath; ///< darkCtrl library (dark_metadata.txt + dark_NNN.fits)
     ///@}
 
     /** \name Algorithm parameters
@@ -107,9 +105,9 @@ class eyeDoctor : public MagAOXApp<true>
     int m_skipFrames{ 1 };
     double m_cenX{ -1.0 }; ///< <0 = auto centroid
     double m_cenY{ -1.0 };
-    double m_satThresh{ 55000.0 }; ///< Warn if camera peak >= this (0 = off)
+    double m_satThresh{ 55000.0 }; ///< Peak ADU treated as saturated (0 = off). Also the auto-exptime trigger.
+    double m_satExptimeFrac{ 0.1 }; ///< Fractional exptime drop on saturation (0.1 = lower by 10%)
     double m_blankThresh{ 0.0 };   ///< Peak ADU treated as off-camera. 0 = 10% of sweep max.
-    double m_exptimeTol{ 1e-4 };    ///< |live exptime - library exptime| allowed [s]
     double m_dmDelay{ 0.1 }; ///< Extra settle after the modes device reports current==target [s]
     double m_ampTol{ 1e-3 }; ///< |current_amps - target| wait tolerance
     double m_ampTimeout{ 10.0 }; ///< Seconds to wait for current_amps
@@ -120,25 +118,17 @@ class eyeDoctor : public MagAOXApp<true>
     bool m_ignoreFocus{ false }; ///< Skip the extra focus-first pass
     ///@}
 
-    /** \name Live camera SET
+    /** \name Live camera exptime (requested between modes / on saturation)
       *@{
       */
+    mutable std::mutex m_camIndiMutex;
     double m_remoteExp{ std::numeric_limits<double>::quiet_NaN() };
-    double m_remoteFps{ std::numeric_limits<double>::quiet_NaN() };
-    double m_remoteGain{ std::numeric_limits<double>::quiet_NaN() };
-    double m_remoteBlacklevel{ std::numeric_limits<double>::quiet_NaN() };
-    ///@}
-
-    /** \name Dark library (matched to live camera SET)
-      *@{
-      */
-    mx::improc::eigenImage<float> m_dark;
-    bool m_haveDark{ false };
-    std::string m_lastDarkPath;
-    double m_darkExptime{ std::numeric_limits<double>::quiet_NaN() };
-    double m_darkGain{ std::numeric_limits<double>::quiet_NaN() };
-    double m_darkBlacklevel{ std::numeric_limits<double>::quiet_NaN() };
-    double m_darkMatchErr{ std::numeric_limits<double>::quiet_NaN() };
+    double m_remoteExpMin{ std::numeric_limits<double>::quiet_NaN() };
+    double m_expSaved{ std::numeric_limits<double>::quiet_NaN() };
+    std::atomic<uint64_t> m_expSeq{ 0 };
+    std::atomic<bool> m_haveExptime{ false };
+    bool m_haveSavedExp{ false };
+    bool m_changedExp{ false };
     ///@}
 
     /** \name Worker
@@ -150,7 +140,6 @@ class eyeDoctor : public MagAOXApp<true>
     std::atomic<bool> m_saveFlatRequested{ false };
     std::atomic<bool> m_abortRequested{ false };
     std::atomic<bool> m_resetRequested{ false };
-    std::atomic<bool> m_darkLibLoadRequested{ false };
     std::atomic<bool> m_busy{ false };
     std::string m_status{ "idle" };
     int m_currentMode{ -1 };
@@ -180,8 +169,6 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_camName );
     pcf::IndiProperty m_indiP_flatDir;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_flatDir );
-    pcf::IndiProperty m_indiP_darkLibPath;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_darkLibPath );
 
     pcf::IndiProperty m_indiP_modeStart;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_modeStart );
@@ -215,10 +202,10 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_cenY );
     pcf::IndiProperty m_indiP_satThresh;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_satThresh );
+    pcf::IndiProperty m_indiP_satExptimeFrac;
+    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_satExptimeFrac );
     pcf::IndiProperty m_indiP_blankThresh;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_blankThresh );
-    pcf::IndiProperty m_indiP_exptimeTol;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_exptimeTol );
     pcf::IndiProperty m_indiP_dmDelay;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_dmDelay );
     pcf::IndiProperty m_indiP_ampTol;
@@ -242,8 +229,6 @@ class eyeDoctor : public MagAOXApp<true>
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_abort );
     pcf::IndiProperty m_indiP_saveFlat;
     INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_saveFlat );
-    pcf::IndiProperty m_indiP_darkLibLoad;
-    INDI_NEWCALLBACK_DECL( eyeDoctor, m_indiP_darkLibLoad );
 
     pcf::IndiProperty m_indiP_status;
     pcf::IndiProperty m_indiP_currentMode;
@@ -251,16 +236,9 @@ class eyeDoctor : public MagAOXApp<true>
     pcf::IndiProperty m_indiP_optAmp;
     pcf::IndiProperty m_indiP_metric;
     pcf::IndiProperty m_indiP_lastFlat;
-    pcf::IndiProperty m_indiP_lastDark;
 
     pcf::IndiProperty m_indiP_remoteExptime;
     INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteExptime );
-    pcf::IndiProperty m_indiP_remoteFps;
-    INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteFps );
-    pcf::IndiProperty m_indiP_remoteEmgain;
-    INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteEmgain );
-    pcf::IndiProperty m_indiP_remoteBlacklevel;
-    INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteBlacklevel );
     pcf::IndiProperty m_indiP_remoteAmps;
     INDI_SETCALLBACK_DECL( eyeDoctor, m_indiP_remoteAmps );
     ///@}
@@ -295,15 +273,21 @@ class eyeDoctor : public MagAOXApp<true>
     static std::string modeElementName( int mode );
     static int parseSearchKind( const std::string &in, std::string &searchKind, std::string &gridKind,
                                 std::string *err );
-    int reloadDarkLib();
-    int refreshDark( bool required );
-    lina::DarkMatchFilter darkFilter() const;
-    std::string formatDarkEntry( const lina::DarkLibraryEntry &e ) const;
-    std::string pickDark( double target_exptime, const lina::DarkMatchFilter &filter,
-                           lina::DarkLibraryEntry *matched, double *match_err );
-    void applyDark( mx::improc::eigenImage<float> &im );
     int measureMetric( mx::improc::eigenImage<float> &im, double &metric );
+    int grabAverage( mx::improc::eigenImage<float> &im );
+    int handleSaturation( mx::improc::eigenImage<float> &im );
+    int sendExptime( double seconds );
+    int waitExptime( double seconds, bool abortable );
+    int setExptimeAndWait( double seconds );
+    int requestExptime();
+    void quietExptimeGet();
+    void restoreExptime();
+    double liveExptime() const;
+    double cameraMinExptime() const;
+    double scaledMetric( double coresum ) const;
+    bool haveExptime() const;
     void warnIfSaturated( const mx::improc::eigenImage<float> &im );
+    static void initToggle( pcf::IndiProperty &p, bool on );
     void setStatus( const std::string &s );
     void setRunToggle( bool on, pcf::IndiProperty::PropertyStateType st );
     void clearRequest( pcf::IndiProperty &p );
@@ -330,14 +314,9 @@ void eyeDoctor::setupConfig()
     config.add( "shmims.shm_cam", "", "shmims.shm_cam", argType::Required, "shmims", "shm_cam", false, "string",
                 "WFS / science camera image shmim." );
     config.add( "camera.cam_name", "", "camera.cam_name", argType::Required, "camera", "cam_name", false, "string",
-                "INDI device name of the WFS camera (exptime/emgain/blacklevel)." );
+                "INDI device name of the WFS camera (exptime is requested between modes)." );
     config.add( "eyedoctor.flat_dir", "", "eyedoctor.flat_dir", argType::Required, "eyedoctor", "flat_dir", false,
                 "string", "Directory for saved flat FITS." );
-    config.add( "eyedoctor.dark_lib_path", "", "eyedoctor.dark_lib_path", argType::Required, "eyedoctor",
-                "dark_lib_path", false, "string",
-                "darkCtrl library directory (dark_metadata.txt + dark_NNN.fits)." );
-    config.add( "eyedoctor.exptime_tol", "", "eyedoctor.exptime_tol", argType::Required, "eyedoctor", "exptime_tol",
-                false, "float", "Max |live-library| exptime difference [s] when picking a dark." );
     config.add( "eyedoctor.mode_start", "", "eyedoctor.mode_start", argType::Required, "eyedoctor", "mode_start", false,
                 "int", "First 0-based mode index to optimize." );
     config.add( "eyedoctor.mode_end", "", "eyedoctor.mode_end", argType::Required, "eyedoctor", "mode_end", false, "int",
@@ -370,7 +349,10 @@ void eyeDoctor::setupConfig()
     config.add( "eyedoctor.cen_y", "", "eyedoctor.cen_y", argType::Required, "eyedoctor", "cen_y", false, "float",
                 "PSF y pixel in the camera image (size[1], 0-based). <0 = auto." );
     config.add( "eyedoctor.sat_thresh", "", "eyedoctor.sat_thresh", argType::Required, "eyedoctor", "sat_thresh",
-                false, "float", "Warn if camera peak ADU >= this. 0 disables." );
+                false, "float", "Peak ADU treated as saturated. Auto-lowers exptime. 0 disables." );
+    config.add( "eyedoctor.sat_exptime_frac", "", "eyedoctor.sat_exptime_frac", argType::Required, "eyedoctor",
+                "sat_exptime_frac", false, "float",
+                "Fractional exptime drop on saturation (0.1 = lower by 10%)." );
     config.add( "eyedoctor.blank_thresh", "", "eyedoctor.blank_thresh", argType::Required, "eyedoctor", "blank_thresh",
                 false, "float", "Peak ADU treated as PSF off-camera. 0 = 10% of the sweep's max peak." );
     config.add( "eyedoctor.dm_delay", "", "eyedoctor.dm_delay", argType::Required, "eyedoctor", "dm_delay", false,
@@ -397,8 +379,6 @@ void eyeDoctor::loadConfig()
     config( m_shmCam, "shmims.shm_cam" );
     config( m_camName, "camera.cam_name" );
     config( m_flatDir, "eyedoctor.flat_dir" );
-    config( m_darkLibPath, "eyedoctor.dark_lib_path" );
-    config( m_exptimeTol, "eyedoctor.exptime_tol" );
     config( m_modeStart, "eyedoctor.mode_start" );
     config( m_modeEnd, "eyedoctor.mode_end" );
     config( m_focusModeIndex, "eyedoctor.focus_mode_index" );
@@ -415,6 +395,11 @@ void eyeDoctor::loadConfig()
     config( m_cenX, "eyedoctor.cen_x" );
     config( m_cenY, "eyedoctor.cen_y" );
     config( m_satThresh, "eyedoctor.sat_thresh" );
+    config( m_satExptimeFrac, "eyedoctor.sat_exptime_frac" );
+    if( !( m_satExptimeFrac > 0.0 ) || m_satExptimeFrac >= 1.0 )
+    {
+        m_satExptimeFrac = 0.1;
+    }
     config( m_blankThresh, "eyedoctor.blank_thresh" );
     config( m_dmDelay, "eyedoctor.dm_delay" );
     config( m_ampTol, "eyedoctor.amp_tol" );
@@ -447,7 +432,6 @@ int eyeDoctor::appStartup()
     CREATE_REG_INDI_NEW_TEXT( m_indiP_shmCam, "shm_cam", "WFS camera image shmim", "shmims" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_camName, "cam_name", "INDI WFS camera device", "camera" );
     CREATE_REG_INDI_NEW_TEXT( m_indiP_flatDir, "flat_dir", "Directory for saved flat FITS", "flat" );
-    CREATE_REG_INDI_NEW_TEXT( m_indiP_darkLibPath, "dark_lib_path", "darkCtrl library directory", "paths" );
 
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeStart, "mode_start", 0, 10000, 1, "%d", "First mode index", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERI( m_indiP_modeEnd, "mode_end", 0, 10000, 1, "%d", "Last mode index", "algorithm" );
@@ -474,11 +458,11 @@ int eyeDoctor::appStartup()
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_cenY, "cen_y", -1, 10000, 0.01, "%0.2f", "PSF y pixel in ROI (<0 auto)",
                                 "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_satThresh, "sat_thresh", 0, 1e9, 1, "%0.1f",
-                                "Saturation warn threshold [ADU]", "algorithm" );
+                                "Saturation / auto-exptime peak [ADU]", "algorithm" );
+    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_satExptimeFrac, "sat_exptime_frac", 0.01, 0.9, 0.01, "%0.2f",
+                                "Exptime drop fraction on saturation", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_blankThresh, "blank_thresh", 0, 1e9, 1, "%0.1f",
                                 "Off-camera peak [ADU] (0 = 10% of max)", "algorithm" );
-    CREATE_REG_INDI_NEW_NUMBERF( m_indiP_exptimeTol, "exptime_tol", 0, 10, 1e-6, "%0.6f",
-                                "Dark exptime match tolerance [s]", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_dmDelay, "dm_delay", 0, 10, 0.01, "%0.3f", "Extra settle [s]", "algorithm" );
     CREATE_REG_INDI_NEW_NUMBERF( m_indiP_ampTol, "amp_tol", 0, 1, 1e-6, "%0.6f", "current_amps wait tolerance",
                                 "algorithm" );
@@ -522,7 +506,6 @@ int eyeDoctor::appStartup()
     CREATE_REG_INDI_NEW_REQUESTSWITCH( m_indiP_abort, "abort" );
     CREATE_REG_INDI_NEW_REQUESTSWITCH( m_indiP_resetToZero, "reset_to_zero" );
     CREATE_REG_INDI_NEW_REQUESTSWITCH( m_indiP_saveFlat, "save_flat" );
-    CREATE_REG_INDI_NEW_REQUESTSWITCH( m_indiP_darkLibLoad, "reload_dark_lib" );
 
     REG_INDI_NEWPROP_NOCB( m_indiP_status, "status", pcf::IndiProperty::Text );
     m_indiP_status.add( pcf::IndiElement( "current" ) );
@@ -548,10 +531,6 @@ int eyeDoctor::appStartup()
     m_indiP_lastFlat.add( pcf::IndiElement( "current" ) );
     m_indiP_lastFlat["current"].set( m_lastFlatPath );
 
-    REG_INDI_NEWPROP_NOCB( m_indiP_lastDark, "last_dark", pcf::IndiProperty::Text );
-    m_indiP_lastDark.add( pcf::IndiElement( "current" ) );
-    m_indiP_lastDark["current"].set( m_lastDarkPath );
-
     m_indiP_modesDevice["current"].setValue( m_modesDevice );
     m_indiP_modesDevice["target"].setValue( m_modesDevice );
     m_indiP_shmDmFlat["current"].setValue( m_shmDmFlat );
@@ -564,8 +543,6 @@ int eyeDoctor::appStartup()
     m_indiP_camName["target"].setValue( m_camName );
     m_indiP_flatDir["current"].setValue( m_flatDir );
     m_indiP_flatDir["target"].setValue( m_flatDir );
-    m_indiP_darkLibPath["current"].setValue( m_darkLibPath );
-    m_indiP_darkLibPath["target"].setValue( m_darkLibPath );
     m_indiP_modeStart["current"].setValue( m_modeStart );
     m_indiP_modeStart["target"].setValue( m_modeStart );
     m_indiP_modeEnd["current"].setValue( m_modeEnd );
@@ -598,10 +575,10 @@ int eyeDoctor::appStartup()
     m_indiP_cenY["target"].setValue( m_cenY );
     m_indiP_satThresh["current"].setValue( m_satThresh );
     m_indiP_satThresh["target"].setValue( m_satThresh );
+    m_indiP_satExptimeFrac["current"].setValue( m_satExptimeFrac );
+    m_indiP_satExptimeFrac["target"].setValue( m_satExptimeFrac );
     m_indiP_blankThresh["current"].setValue( m_blankThresh );
     m_indiP_blankThresh["target"].setValue( m_blankThresh );
-    m_indiP_exptimeTol["current"].setValue( m_exptimeTol );
-    m_indiP_exptimeTol["target"].setValue( m_exptimeTol );
     m_indiP_dmDelay["current"].setValue( m_dmDelay );
     m_indiP_dmDelay["target"].setValue( m_dmDelay );
     m_indiP_ampTol["current"].setValue( m_ampTol );
@@ -611,17 +588,14 @@ int eyeDoctor::appStartup()
     m_indiP_searchKind["current"].setValue( m_searchKind );
     m_indiP_searchKind["target"].setValue( m_searchKind );
 
-    updateSwitchIfChanged( m_indiP_baseline, "toggle", m_baseline ? pcf::IndiElement::On : pcf::IndiElement::Off,
-                           m_baseline ? INDI_OK : INDI_IDLE );
-    updateSwitchIfChanged( m_indiP_randomize, "toggle", m_randomize ? pcf::IndiElement::On : pcf::IndiElement::Off,
-                           m_randomize ? INDI_OK : INDI_IDLE );
-    updateSwitchIfChanged( m_indiP_ignoreFocus, "toggle", m_ignoreFocus ? pcf::IndiElement::On : pcf::IndiElement::Off,
-                           m_ignoreFocus ? INDI_OK : INDI_IDLE );
+    initToggle( m_indiP_baseline, m_baseline );
+    initToggle( m_indiP_randomize, m_randomize );
+    initToggle( m_indiP_ignoreFocus, m_ignoreFocus );
 
+    // current_amps is needed to wait for mode commands. exptime is requested
+    // on demand between modes (and on saturation), not as a standing camera dump.
     REG_INDI_SETPROP( m_indiP_remoteExptime, m_camName, "exptime" );
-    REG_INDI_SETPROP( m_indiP_remoteFps, m_camName, "fps" );
-    REG_INDI_SETPROP( m_indiP_remoteEmgain, m_camName, "emgain" );
-    REG_INDI_SETPROP( m_indiP_remoteBlacklevel, m_camName, "blacklevel" );
+    quietExptimeGet();
     REG_INDI_SETPROP( m_indiP_remoteAmps, m_modesDevice, "current_amps" );
 
     m_worker = std::thread( workerStart, this );
@@ -707,18 +681,6 @@ void eyeDoctor::workerExec()
             else
             {
                 setStatus( "reset error" );
-            }
-        }
-        else if( m_darkLibLoadRequested.load() && !m_busy.load() )
-        {
-            m_busy = true;
-            const int rv = reloadDarkLib();
-            m_busy = false;
-            m_darkLibLoadRequested = false;
-            clearRequest( m_indiP_darkLibLoad );
-            if( rv != 0 && m_status.find( "reload_dark_lib" ) == std::string::npos )
-            {
-                setStatus( "reload_dark_lib: failed" );
             }
         }
         else if( m_saveFlatRequested.load() && !m_busy.load() )
@@ -816,18 +778,26 @@ std::string eyeDoctor::timestampNow()
     return buf;
 }
 
-int eyeDoctor::measureMetric( mx::improc::eigenImage<float> &im, double &metric )
+int eyeDoctor::grabAverage( mx::improc::eigenImage<float> &im )
 {
-    const int rv = m_hw.cam.grabMean(
+    return m_hw.cam.grabMean(
         static_cast<unsigned>( std::max( 1, m_nImages ) ), static_cast<unsigned>( std::max( 0, m_skipFrames ) ),
         [this]() { return stopping(); }, im );
+}
+
+int eyeDoctor::measureMetric( mx::improc::eigenImage<float> &im, double &metric )
+{
+    const int rv = grabAverage( im );
     if( rv < 0 )
     {
         return rv;
     }
+    if( handleSaturation( im ) < 0 )
+    {
+        return stopping() ? -2 : -1;
+    }
     warnIfSaturated( im );
-    applyDark( im );
-    metric = dev::psfMetrics::coreSum( im, m_coreRadius, m_cenX, m_cenY );
+    metric = scaledMetric( dev::psfMetrics::coreSum( im, m_coreRadius, m_cenX, m_cenY ) );
     return 0;
 }
 
@@ -850,6 +820,277 @@ void eyeDoctor::warnIfSaturated( const mx::improc::eigenImage<float> &im )
     log<text_log>( "saturation warning: mode " + std::to_string( m_currentMode ) + " peak=" +
                        std::to_string( peak ) + " >= sat_thresh " + std::to_string( m_satThresh ) + " ADU",
                    logPrio::LOG_WARNING );
+}
+
+void eyeDoctor::initToggle( pcf::IndiProperty &p, bool on )
+{
+    if( !p.find( "toggle" ) )
+    {
+        return;
+    }
+    p["toggle"].setSwitchState( on ? pcf::IndiElement::On : pcf::IndiElement::Off );
+    p.setState( on ? pcf::IndiProperty::Ok : pcf::IndiProperty::Idle );
+}
+
+double eyeDoctor::liveExptime() const
+{
+    std::lock_guard<std::mutex> lock( m_camIndiMutex );
+    return m_remoteExp;
+}
+
+bool eyeDoctor::haveExptime() const
+{
+    if( !m_haveExptime.load() )
+    {
+        return false;
+    }
+    const double exp = liveExptime();
+    return std::isfinite( exp ) && exp > 0.0;
+}
+
+double eyeDoctor::cameraMinExptime() const
+{
+    std::lock_guard<std::mutex> lock( m_camIndiMutex );
+    if( std::isfinite( m_remoteExpMin ) && m_remoteExpMin > 0.0 )
+    {
+        return m_remoteExpMin;
+    }
+    return 1e-5;
+}
+
+double eyeDoctor::scaledMetric( double coresum ) const
+{
+    if( !haveExptime() )
+    {
+        return coresum;
+    }
+    return coresum / liveExptime();
+}
+
+void eyeDoctor::quietExptimeGet()
+{
+    const std::string key = m_camName + ".exptime";
+    auto it = m_indiSetCallBacks.find( key );
+    if( it != m_indiSetCallBacks.end() )
+    {
+        it->second.m_defReceived = true;
+    }
+}
+
+int eyeDoctor::requestExptime()
+{
+    if( m_camName.empty() )
+    {
+        m_haveExptime = false;
+        return -1;
+    }
+    if( m_indiDriver == nullptr )
+    {
+        m_haveExptime = false;
+        log<text_log>( "no INDI driver; using raw coresum metric", logPrio::LOG_WARNING );
+        return -1;
+    }
+
+    m_indiP_remoteExptime.setDevice( m_camName );
+    m_indiP_remoteExptime.setName( "exptime" );
+    const std::string key = m_indiP_remoteExptime.createUniqueKey();
+    if( m_indiSetCallBacks.count( key ) == 0 )
+    {
+        m_indiSetCallBacks.insert(
+            { key, { &m_indiP_remoteExptime, INDI_SETCALLBACK( m_indiP_remoteExptime ) } } );
+    }
+
+    const uint64_t seq0 = m_expSeq.load();
+    try
+    {
+        m_indiDriver->sendGetProperties( m_indiP_remoteExptime );
+    }
+    catch( const std::exception &e )
+    {
+        m_haveExptime = false;
+        quietExptimeGet();
+        log<text_log>( std::string( "GET " ) + key + " failed: " + e.what() + "; using raw coresum metric",
+                       logPrio::LOG_WARNING );
+        return -1;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const double timeout = std::max( 0.5, std::min( 3.0, m_ampTimeout ) );
+    while( !shuttingDown() )
+    {
+        if( m_expSeq.load() != seq0 )
+        {
+            const double cur = liveExptime();
+            if( std::isfinite( cur ) && cur > 0.0 )
+            {
+                m_haveExptime = true;
+                quietExptimeGet();
+                return 0;
+            }
+        }
+        const double elapsed =
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+        if( elapsed > timeout )
+        {
+            m_haveExptime = false;
+            quietExptimeGet();
+            log<text_log>( "no " + key + " from INDI (device or property missing); using raw coresum metric",
+                           logPrio::LOG_WARNING );
+            return -1;
+        }
+        mx::sys::milliSleep( 20 );
+    }
+    m_haveExptime = false;
+    return -2;
+}
+
+int eyeDoctor::sendExptime( double seconds )
+{
+    if( m_camName.empty() || !std::isfinite( seconds ) || !( seconds > 0.0 ) )
+    {
+        return -1;
+    }
+    pcf::IndiProperty ip( pcf::IndiProperty::Number );
+    ip.setDevice( m_camName );
+    ip.setName( "exptime" );
+    ip.add( pcf::IndiElement( "target" ) );
+    ip["target"] = seconds;
+    if( sendNewProperty( ip ) < 0 )
+    {
+        log<software_error>( { __FILE__, __LINE__, "sendNewProperty " + m_camName + ".exptime.target" } );
+        return -1;
+    }
+    return 0;
+}
+
+int eyeDoctor::waitExptime( double seconds, bool abortable )
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const double timeout = std::max( 0.1, m_ampTimeout );
+    const double tol = 1e-6;
+    while( !shuttingDown() && !( abortable && stopping() ) )
+    {
+        const double cur = liveExptime();
+        if( std::isfinite( cur ) && std::fabs( cur - seconds ) <= std::max( tol, 1e-3 * std::fabs( seconds ) ) )
+        {
+            return 0;
+        }
+        const double elapsed =
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+        if( elapsed > timeout )
+        {
+            log<text_log>( "timeout waiting for " + m_camName + ".exptime.current = " + std::to_string( seconds ) +
+                               " (live=" + std::to_string( cur ) + ")",
+                           logPrio::LOG_WARNING );
+            return -1;
+        }
+        mx::sys::milliSleep( 20 );
+    }
+    return -2;
+}
+
+int eyeDoctor::setExptimeAndWait( double seconds )
+{
+    if( sendExptime( seconds ) < 0 )
+    {
+        return -1;
+    }
+    const int rv = waitExptime( seconds, true );
+    if( rv < 0 )
+    {
+        return rv;
+    }
+    m_changedExp = true;
+    m_haveExptime = true;
+    mx::sys::milliSleep( 50 );
+    return 0;
+}
+
+void eyeDoctor::restoreExptime()
+{
+    if( !m_haveSavedExp || !m_changedExp )
+    {
+        return;
+    }
+    if( !std::isfinite( m_expSaved ) || !( m_expSaved > 0.0 ) )
+    {
+        return;
+    }
+    log<text_log>( "restoring " + m_camName + ".exptime to " + std::to_string( m_expSaved ) );
+    if( sendExptime( m_expSaved ) < 0 )
+    {
+        log<text_log>( "failed to restore " + m_camName + ".exptime", logPrio::LOG_WARNING );
+        return;
+    }
+    waitExptime( m_expSaved, false );
+    m_changedExp = false;
+}
+
+int eyeDoctor::handleSaturation( mx::improc::eigenImage<float> &im )
+{
+    if( !( m_satThresh > 0.0 ) || im.size() == 0 )
+    {
+        return 0;
+    }
+
+    for( int attempt = 0; attempt < 8; ++attempt )
+    {
+        if( stopping() )
+        {
+            return -2;
+        }
+        const float peak = im.maxCoeff();
+        if( peak < static_cast<float>( m_satThresh ) )
+        {
+            return 0;
+        }
+
+        if( !haveExptime() )
+        {
+            log<text_log>( "saturation warning: peak=" + std::to_string( peak ) + " >= sat_thresh " +
+                               std::to_string( m_satThresh ) +
+                               " ADU; no camera exptime, leaving exposure unchanged",
+                           logPrio::LOG_WARNING );
+            return 0;
+        }
+
+        const double exp = liveExptime();
+        double frac = m_satExptimeFrac;
+        if( !( frac > 0.0 ) || frac >= 1.0 )
+        {
+            frac = 0.1;
+        }
+        const double minExp = cameraMinExptime();
+        double newExp = exp * ( 1.0 - frac );
+        if( newExp < minExp )
+        {
+            newExp = minExp;
+        }
+        if( !( newExp < exp * 0.999 ) )
+        {
+            log<text_log>( "saturation warning: peak=" + std::to_string( peak ) + " >= sat_thresh " +
+                               std::to_string( m_satThresh ) + " ADU; exptime already at min " +
+                               std::to_string( exp ) + " s",
+                           logPrio::LOG_WARNING );
+            return 0;
+        }
+
+        log<text_log>( "saturation warning: peak=" + std::to_string( peak ) + " >= sat_thresh " +
+                           std::to_string( m_satThresh ) + " ADU; setting " + m_camName + ".exptime from " +
+                           std::to_string( exp ) + " s to " + std::to_string( newExp ) + " s (drop " +
+                           std::to_string( frac * 100.0 ) + "%)",
+                       logPrio::LOG_WARNING );
+        if( setExptimeAndWait( newExp ) < 0 )
+        {
+            return stopping() ? -2 : -1;
+        }
+        const int gv = grabAverage( im );
+        if( gv < 0 )
+        {
+            return gv;
+        }
+    }
+    return 0;
 }
 
 std::string eyeDoctor::modeElementName( int mode )
@@ -1218,298 +1459,6 @@ std::vector<int> eyeDoctor::buildSequence( const std::vector<int> &modes ) const
     return seq;
 }
 
-lina::DarkMatchFilter eyeDoctor::darkFilter() const
-{
-    lina::DarkMatchFilter f;
-    f.shm_cam_input = m_shmCam;
-    if( m_hw.cam.isOpen() )
-    {
-        f.width = m_hw.cam.size0();
-        f.height = m_hw.cam.size1();
-    }
-    if( std::isfinite( m_remoteGain ) )
-    {
-        f.gain = m_remoteGain;
-    }
-    if( std::isfinite( m_remoteBlacklevel ) )
-    {
-        f.blacklevel = m_remoteBlacklevel;
-    }
-    return f;
-}
-
-std::string eyeDoctor::formatDarkEntry( const lina::DarkLibraryEntry &e ) const
-{
-    std::ostringstream ss;
-    ss << std::setprecision( 17 );
-    ss << ( e.relpath.empty() ? "-" : e.relpath ) << " exptime=";
-    if( std::isfinite( e.exptime ) )
-    {
-        ss << e.exptime;
-    }
-    else
-    {
-        ss << "nan";
-    }
-    ss << " shm_cam_input=" << ( e.shm_cam_input.empty() ? "-" : e.shm_cam_input ) << " emgain=";
-    if( std::isfinite( e.gain ) )
-    {
-        ss << e.gain;
-    }
-    else
-    {
-        ss << "nan";
-    }
-    ss << " blacklevel=";
-    if( std::isfinite( e.blacklevel ) )
-    {
-        ss << e.blacklevel;
-    }
-    else
-    {
-        ss << "nan";
-    }
-    if( e.width > 0 && e.height > 0 )
-    {
-        ss << " " << e.width << "x" << e.height;
-    }
-    return ss.str();
-}
-
-std::string eyeDoctor::pickDark( double target_exptime, const lina::DarkMatchFilter &filter,
-                                  lina::DarkLibraryEntry *matched, double *match_err )
-{
-    const auto all = lina::load_dark_library_manifest( m_darkLibPath );
-    const auto entries = lina::filter_dark_library_entries( all, filter );
-    if( entries.empty() )
-    {
-        return {};
-    }
-
-    std::size_t best = 0;
-    double best_err = std::numeric_limits<double>::infinity();
-    bool found = false;
-    for( std::size_t i = 0; i < entries.size(); ++i )
-    {
-        if( !std::isfinite( entries[i].exptime ) )
-        {
-            continue;
-        }
-        if( !std::isfinite( target_exptime ) )
-        {
-            best = i;
-            best_err = 0;
-            found = true;
-            break;
-        }
-        const double err = std::fabs( entries[i].exptime - target_exptime );
-        if( err < best_err )
-        {
-            best_err = err;
-            best = i;
-            found = true;
-        }
-    }
-    if( !found )
-    {
-        return {};
-    }
-    if( std::isfinite( target_exptime ) && best_err > m_exptimeTol )
-    {
-        if( matched )
-        {
-            *matched = entries[best];
-        }
-        if( match_err )
-        {
-            *match_err = best_err;
-        }
-        return {};
-    }
-    if( matched )
-    {
-        *matched = entries[best];
-    }
-    if( match_err )
-    {
-        *match_err = best_err;
-    }
-    const std::string &rel = entries[best].relpath;
-    if( !rel.empty() && rel[0] == '/' )
-    {
-        return rel;
-    }
-    if( m_darkLibPath.empty() )
-    {
-        return rel;
-    }
-    if( m_darkLibPath.back() == '/' )
-    {
-        return m_darkLibPath + rel;
-    }
-    return m_darkLibPath + "/" + rel;
-}
-
-int eyeDoctor::refreshDark( bool required )
-{
-    m_haveDark = false;
-    m_lastDarkPath.clear();
-    m_darkExptime = std::numeric_limits<double>::quiet_NaN();
-    m_darkGain = std::numeric_limits<double>::quiet_NaN();
-    m_darkBlacklevel = std::numeric_limits<double>::quiet_NaN();
-    m_darkMatchErr = std::numeric_limits<double>::quiet_NaN();
-    updateIfChanged( m_indiP_lastDark, "current", m_lastDarkPath );
-
-    if( m_darkLibPath.empty() )
-    {
-        if( required )
-        {
-            setStatus( "reload_dark_lib: failed" );
-            return log<software_error, -1>( { __FILE__, __LINE__, "dark_lib_path is empty" } );
-        }
-        return 0;
-    }
-
-    const auto all = lina::load_dark_library_manifest( m_darkLibPath );
-    if( all.empty() )
-    {
-        const std::string msg = "no dark_metadata.txt entries in " + m_darkLibPath;
-        if( required )
-        {
-            setStatus( "reload_dark_lib: failed" );
-            return log<software_error, -1>( { __FILE__, __LINE__, msg } );
-        }
-        log<text_log>( msg, logPrio::LOG_WARNING );
-        return 0;
-    }
-
-    const auto filt = lina::filter_dark_library_entries( all, darkFilter() );
-    if( filt.empty() )
-    {
-        std::ostringstream ss;
-        ss << std::setprecision( 17 );
-        ss << "no darks matching shm_cam=" << m_shmCam << " emgain=";
-        if( std::isfinite( m_remoteGain ) )
-        {
-            ss << m_remoteGain;
-        }
-        else
-        {
-            ss << "nan";
-        }
-        ss << " blacklevel=";
-        if( std::isfinite( m_remoteBlacklevel ) )
-        {
-            ss << m_remoteBlacklevel;
-        }
-        else
-        {
-            ss << "nan";
-        }
-        ss << " in " << m_darkLibPath << " (entries=" << all.size() << ")";
-        if( required )
-        {
-            setStatus( "reload_dark_lib: failed" );
-            return log<software_error, -1>( { __FILE__, __LINE__, ss.str() } );
-        }
-        log<text_log>( ss.str(), logPrio::LOG_WARNING );
-        return 0;
-    }
-
-    const double target_exptime = m_remoteExp;
-    lina::DarkLibraryEntry matched;
-    double match_err = std::numeric_limits<double>::quiet_NaN();
-    const std::string path = pickDark( target_exptime, darkFilter(), &matched, &match_err );
-    if( path.empty() )
-    {
-        std::ostringstream ss;
-        ss << std::setprecision( 17 );
-        ss << "no dark within exptime_tol=" << m_exptimeTol << " s of live exptime=";
-        if( std::isfinite( target_exptime ) )
-        {
-            ss << target_exptime;
-        }
-        else
-        {
-            ss << "nan";
-        }
-        if( std::isfinite( match_err ) )
-        {
-            ss << " (nearest err=" << match_err << " s, " << formatDarkEntry( matched ) << ")";
-        }
-        if( required )
-        {
-            setStatus( "reload_dark_lib: failed" );
-            return log<software_error, -1>( { __FILE__, __LINE__, ss.str() } );
-        }
-        log<text_log>( ss.str(), logPrio::LOG_WARNING );
-        return 0;
-    }
-
-    mx::improc::eigenImage<float> dark;
-    if( dev::readFitsImage( path, dark ) < 0 )
-    {
-        const std::string msg = "failed to read dark FITS " + path;
-        if( required )
-        {
-            setStatus( "reload_dark_lib: failed" );
-            return log<software_error, -1>( { __FILE__, __LINE__, msg } );
-        }
-        log<text_log>( msg, logPrio::LOG_WARNING );
-        return 0;
-    }
-    dev::replaceNonFinite( dark );
-
-    m_dark = dark;
-    m_haveDark = true;
-    m_lastDarkPath = path;
-    m_darkExptime = matched.exptime;
-    m_darkGain = matched.gain;
-    m_darkBlacklevel = matched.blacklevel;
-    m_darkMatchErr = match_err;
-    updateIfChanged( m_indiP_lastDark, "current", m_lastDarkPath );
-
-    std::ostringstream oss;
-    oss << "dark library match: using " << path << " (" << formatDarkEntry( matched );
-    if( std::isfinite( match_err ) )
-    {
-        oss << ", |err|=" << match_err << " s";
-    }
-    oss << ")";
-    log<text_log>( oss.str() );
-    return 0;
-}
-
-int eyeDoctor::reloadDarkLib()
-{
-    setStatus( "reload_dark_lib: starting" );
-    if( refreshDark( true ) < 0 )
-    {
-        return -1;
-    }
-    setStatus( "reload_dark_lib: done (" + m_lastDarkPath + ")" );
-    return 0;
-}
-
-void eyeDoctor::applyDark( mx::improc::eigenImage<float> &im )
-{
-    if( !m_haveDark || im.size() == 0 )
-    {
-        return;
-    }
-    if( im.rows() != m_dark.rows() || im.cols() != m_dark.cols() )
-    {
-        log<text_log>( "dark size " + std::to_string( m_dark.rows() ) + "x" +
-                           std::to_string( m_dark.cols() ) + " != camera " +
-                           std::to_string( im.rows() ) + "x" + std::to_string( im.cols() ) +
-                           "; skipping dark subtraction",
-                       logPrio::LOG_WARNING );
-        m_haveDark = false;
-        return;
-    }
-    im -= m_dark;
-}
-
 int eyeDoctor::saveFlat()
 {
     setStatus( "saving flat" );
@@ -1588,6 +1537,8 @@ int eyeDoctor::optimizeMode( int mi, mx::improc::eigenImage<float> &camIm )
     m_currentMode = mi;
     m_satWarnedMode = -2;
     updateIfChanged( m_indiP_currentMode, "current", static_cast<double>( mi ) );
+
+    requestExptime();
 
     const double baseval = m_baseline ? currentAmp( mi ) : 0.0;
     const double lo = -0.5 * m_searchRange;
@@ -1731,6 +1682,19 @@ int eyeDoctor::runOptimization()
 {
     setStatus( "connecting" );
 
+    m_changedExp = false;
+    m_haveSavedExp = false;
+    m_expSaved = std::numeric_limits<double>::quiet_NaN();
+
+    struct RestoreExp
+    {
+        eyeDoctor *self;
+        ~RestoreExp()
+        {
+            self->restoreExptime();
+        }
+    } restoreExp{ this };
+
     m_hw.camName = m_shmCam;
     m_hw.camDevice = m_camName;
     m_hw.disconnect();
@@ -1743,6 +1707,21 @@ int eyeDoctor::runOptimization()
     if( stopping() )
     {
         return -2;
+    }
+
+    setStatus( "camera " + m_camName );
+    if( requestExptime() == 0 )
+    {
+        m_expSaved = liveExptime();
+        m_haveSavedExp = std::isfinite( m_expSaved ) && m_expSaved > 0.0;
+        log<text_log>( m_camName + ".exptime.current=" + std::to_string( m_expSaved ) +
+                       "; metric = coresum / exptime" );
+    }
+    else
+    {
+        m_haveExptime = false;
+        m_haveSavedExp = false;
+        log<text_log>( "metric = raw negative coresum (no live exptime)" );
     }
 
     setStatus( "waiting for " + m_modesDevice );
@@ -1798,12 +1777,26 @@ int eyeDoctor::runOptimization()
     }
     log<text_log>( ms.str() );
 
-    if( !m_darkLibPath.empty() )
-    {
-        refreshDark( false );
-    }
-
     mx::improc::eigenImage<float> camIm;
+    setStatus( "saturation check" );
+    if( grabAverage( camIm ) < 0 )
+    {
+        if( stopping() )
+        {
+            return -2;
+        }
+        setStatus( "camera grab failed" );
+        return -1;
+    }
+    if( handleSaturation( camIm ) < 0 )
+    {
+        return stopping() ? -2 : -1;
+    }
+    if( camIm.size() > 0 )
+    {
+        log<text_log>( "run start peak=" + std::to_string( camIm.maxCoeff() ) + " ADU, exptime=" +
+                       std::to_string( liveExptime() ) + " s" );
+    }
 
     const bool focusFirst = m_randomize && !m_ignoreFocus && allowed.size() > 1;
     if( focusFirst )
@@ -1922,10 +1915,19 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_camName )( const pcf::IndiProperty &ip
     {
         return log<software_error, -1>( { __FILE__, __LINE__ } );
     }
-    log<text_log>( "cam_name: " + m_camName + " -> " + target + " (exptime/fps SET still bound to startup device)",
-                   logPrio::LOG_WARNING );
+    log<text_log>( "cam_name: " + m_camName + " -> " + target );
     m_camName = target;
     updateIfChanged( m_indiP_camName, "current", m_camName );
+    m_indiP_remoteExptime.setDevice( m_camName );
+    m_indiP_remoteExptime.setName( "exptime" );
+    const std::string key = m_indiP_remoteExptime.createUniqueKey();
+    if( m_indiSetCallBacks.count( key ) == 0 )
+    {
+        m_indiSetCallBacks.insert(
+            { key, { &m_indiP_remoteExptime, INDI_SETCALLBACK( m_indiP_remoteExptime ) } } );
+    }
+    quietExptimeGet();
+    m_haveExptime = false;
     return 0;
 }
 
@@ -1939,26 +1941,6 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_flatDir )( const pcf::IndiProperty &ip
     }
     m_flatDir = target;
     updateIfChanged( m_indiP_flatDir, "current", m_flatDir );
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_darkLibPath )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_darkLibPath, ipRecv );
-    std::string target;
-    if( indiTargetUpdate( m_indiP_darkLibPath, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    if( target != m_darkLibPath )
-    {
-        log<text_log>( "dark_lib_path: " + m_darkLibPath + " -> " + target );
-        m_haveDark = false;
-        m_lastDarkPath.clear();
-        updateIfChanged( m_indiP_lastDark, "current", m_lastDarkPath );
-    }
-    m_darkLibPath = target;
-    updateIfChanged( m_indiP_darkLibPath, "current", m_darkLibPath );
     return 0;
 }
 
@@ -2182,6 +2164,27 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_satThresh )( const pcf::IndiProperty &
     return 0;
 }
 
+INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_satExptimeFrac )( const pcf::IndiProperty &ipRecv )
+{
+    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_satExptimeFrac, ipRecv );
+    float target = 0;
+    if( indiTargetUpdate( m_indiP_satExptimeFrac, target, ipRecv, false ) < 0 )
+    {
+        return log<software_error, -1>( { __FILE__, __LINE__ } );
+    }
+    if( target < 0.01f )
+    {
+        target = 0.01f;
+    }
+    if( target > 0.9f )
+    {
+        target = 0.9f;
+    }
+    m_satExptimeFrac = target;
+    updateIfChanged( m_indiP_satExptimeFrac, "current", m_satExptimeFrac );
+    return 0;
+}
+
 INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_blankThresh )( const pcf::IndiProperty &ipRecv )
 {
     INDI_VALIDATE_CALLBACK_PROPS( m_indiP_blankThresh, ipRecv );
@@ -2192,19 +2195,6 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_blankThresh )( const pcf::IndiProperty
     }
     m_blankThresh = target;
     updateIfChanged( m_indiP_blankThresh, "current", m_blankThresh );
-    return 0;
-}
-
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_exptimeTol )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_exptimeTol, ipRecv );
-    float target = 0;
-    if( indiTargetUpdate( m_indiP_exptimeTol, target, ipRecv, false ) < 0 )
-    {
-        return log<software_error, -1>( { __FILE__, __LINE__ } );
-    }
-    m_exptimeTol = target;
-    updateIfChanged( m_indiP_exptimeTol, "current", m_exptimeTol );
     return 0;
 }
 
@@ -2338,7 +2328,7 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_run )( const pcf::IndiProperty &ipRecv
     if( ipRecv["toggle"].getSwitchState() == pcf::IndiElement::On )
     {
         if( m_busy.load() || m_saveFlatRequested.load() || m_abortRequested.load() ||
-            m_resetRequested.load() || m_darkLibLoadRequested.load() )
+            m_resetRequested.load() )
         {
             log<text_log>( "run: already busy", logPrio::LOG_WARNING );
             return 0;
@@ -2391,27 +2381,6 @@ INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_saveFlat )( const pcf::IndiProperty &i
     return 0;
 }
 
-INDI_NEWCALLBACK_DEFN( eyeDoctor, m_indiP_darkLibLoad )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_darkLibLoad, ipRecv );
-    if( !ipRecv.find( "request" ) )
-    {
-        return -1;
-    }
-    if( ipRecv["request"].getSwitchState() == pcf::IndiElement::On )
-    {
-        if( m_busy.load() || m_runRequested.load() )
-        {
-            log<text_log>( "reload_dark_lib: already busy", logPrio::LOG_WARNING );
-            clearRequest( m_indiP_darkLibLoad );
-            return 0;
-        }
-        m_darkLibLoadRequested = true;
-        updateSwitchIfChanged( m_indiP_darkLibLoad, "request", pcf::IndiElement::On, INDI_BUSY );
-    }
-    return 0;
-}
-
 namespace
 {
 bool parseIndiCurrentNumber( const pcf::IndiProperty &ip, double &out )
@@ -2446,28 +2415,44 @@ bool parseIndiCurrentNumber( const pcf::IndiProperty &ip, double &out )
 INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteExptime )( const pcf::IndiProperty &ipRecv )
 {
     INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteExptime, ipRecv );
-    parseIndiCurrentNumber( ipRecv, m_remoteExp );
-    return 0;
-}
-
-INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteFps )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteFps, ipRecv );
-    parseIndiCurrentNumber( ipRecv, m_remoteFps );
-    return 0;
-}
-
-INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteEmgain )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteEmgain, ipRecv );
-    parseIndiCurrentNumber( ipRecv, m_remoteGain );
-    return 0;
-}
-
-INDI_SETCALLBACK_DEFN( eyeDoctor, m_indiP_remoteBlacklevel )( const pcf::IndiProperty &ipRecv )
-{
-    INDI_VALIDATE_CALLBACK_PROPS( m_indiP_remoteBlacklevel, ipRecv );
-    parseIndiCurrentNumber( ipRecv, m_remoteBlacklevel );
+    double exp = std::numeric_limits<double>::quiet_NaN();
+    parseIndiCurrentNumber( ipRecv, exp );
+    double minExp = std::numeric_limits<double>::quiet_NaN();
+    try
+    {
+        if( ipRecv.find( "current" ) )
+        {
+            const std::string s = ipRecv["current"].getMin();
+            if( !s.empty() )
+            {
+                char *end = nullptr;
+                const double v = std::strtod( s.c_str(), &end );
+                if( end != s.c_str() && std::isfinite( v ) && v > 0.0 )
+                {
+                    minExp = v;
+                }
+            }
+        }
+    }
+    catch( ... )
+    {
+    }
+    {
+        std::lock_guard<std::mutex> lock( m_camIndiMutex );
+        if( std::isfinite( exp ) )
+        {
+            m_remoteExp = exp;
+        }
+        if( std::isfinite( minExp ) )
+        {
+            m_remoteExpMin = minExp;
+        }
+    }
+    if( std::isfinite( exp ) && exp > 0.0 )
+    {
+        m_haveExptime = true;
+        m_expSeq.fetch_add( 1 );
+    }
     return 0;
 }
 

@@ -1,8 +1,5 @@
 # Eye Doctor MagAO-X application
 #
-# INDI equivalent of:
-#   dm_eye_doctor 7624 alpaoModes camsci 8 2...10 0.1 --skip 1
-#
 # Install as /opt/MagAOX/config/eyeDoctor.conf (or eyeDoc.conf if that is the
 # process configName). Requires a running dmMode instance (alpaoModes, etc.).
 
@@ -16,7 +13,6 @@ cam_name = camsci
 
 [eyedoctor]
 modes_device = alpaoModes
-# modes = 2...10,12
 mode_start = 2
 mode_end = 10
 focus_mode_index = 2
@@ -32,7 +28,9 @@ n_images = 3
 skip_frames = 2
 # cen_x = 255
 # cen_y = 255
+# Peak ADU that counts as saturated. On saturation, exptime is reduced by sat_exptime_frac.
 sat_thresh = 55000
+sat_exptime_frac = 0.1
 blank_thresh = 0
 dm_delay = 0.1
 amp_tol = 0.001
@@ -43,5 +41,3 @@ randomize = true
 ignore_focus = false
 #flat_dir = /opt/MagAOX/calib/dm/bmc_1k/flats
 flat_dir = /opt/MagAOX/calib/dm/alpao_bax735/flats
-# dark_lib_path = /opt/MagAOX/data/darks/camsci
-exptime_tol = 0.0001
